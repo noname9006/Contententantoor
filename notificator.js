@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder, Partials } = require('discord.js');
 
+// Initialize client with required intents
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -11,7 +12,7 @@ const client = new Client({
     partials: [Partials.Message, Partials.Channel]
 });
 
-// Create mappings for roles and threads (update these lines with your own environment variables or hard-coded IDs as needed)
+// Create mappings for roles and threads
 const roleToThread = new Map([
     [process.env.ROLE_0_ID, process.env.THREAD_0_ID],
     [process.env.ROLE_1_ID, process.env.THREAD_1_ID],
@@ -30,84 +31,113 @@ const threadToRole = new Map([
     [process.env.THREAD_5_ID, process.env.ROLE_5_ID]
 ]);
 
-// Create a Set of ignored roles for easier checking
+// Cache for thread names
+const threadNameCache = new Map();
+
+// Create a Set of ignored roles
 const ignoredRoles = new Set(
     process.env.IGNORED_ROLES
         ? process.env.IGNORED_ROLES.split(',').map(role => role.trim())
         : []
 );
 
-// Adjust this length to control how much text can be embedded
+// Constants
 const MAX_TEXT_LENGTH = 200;
+const ERROR_COLOR = '#FF0000';
 
-client.once('ready', () => {
-    console.log('Bot is ready!');
+// Utility function for getting thread name
+async function getThreadName(threadId) {
+    // Check cache first
+    if (threadNameCache.has(threadId)) {
+        return threadNameCache.get(threadId);
+    }
+
+    try {
+        const channel = await client.channels.fetch(threadId);
+        const threadName = channel ? channel.name : threadId;
+        threadNameCache.set(threadId, threadName);
+        return threadName;
+    } catch (error) {
+        console.error(`Error fetching thread name for ${threadId}:`, error);
+        return threadId;
+    }
+}
+
+// Utility function for logging with timestamp
+async function logWithTimestamp(message, type = 'INFO') {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] [${type}] ${message}`);
+}
+
+// Event handler for when the bot is ready
+client.once('ready', async () => {
+    logWithTimestamp('Bot is ready and online!', 'STARTUP');
+    
+    // Initialize thread name cache
+    for (const threadId of threadToRole.keys()) {
+        const threadName = await getThreadName(threadId);
+        logWithTimestamp(`Monitoring thread: ${threadName}`, 'CONFIG');
+    }
 });
 
+// Main message handler
 client.on('messageCreate', async (message) => {
-    // Log that a message was received, but do not log its content
-    console.log(`Received message in channel ${message.channel.id} from ${message.author.tag}.`);
+    // Early exit if not in monitored thread
+    if (!threadToRole.has(message.channel.id)) {
+        return;
+    }
+
+    const threadName = await getThreadName(message.channel.id);
+
+    // Log message receipt in monitored channel
+    logWithTimestamp(`Message received in thread "${threadName}" from ${message.author.tag}`, 'MESSAGE');
 
     // Ignore bot messages
     if (message.author.bot) {
-        console.log('Ignoring bot message.');
+        logWithTimestamp(`Ignoring bot message in "${threadName}"`, 'BOT');
         return;
     }
 
-    // Check if message is in one of our monitored threads
-    if (!threadToRole.has(message.channel.id)) {
-        console.log(`Channel ${message.channel.id} is not monitored.`);
-        return;
-    }
-
-    // Check if user has any ignored roles
-    const hasIgnoredRole = message.member.roles.cache.some(role =>
+    // Check for ignored roles
+    const hasIgnoredRole = message.member.roles.cache.some(role => 
         ignoredRoles.has(role.id)
     );
     if (hasIgnoredRole) {
-        console.log(`${message.author.tag} has an ignored role. Allowing message to pass.`);
+        logWithTimestamp(`User ${message.author.tag} has an ignored role - message allowed in "${threadName}"`, 'ROLE');
         return;
     }
 
-    // Get the required role for this thread
+    // Get required role for this thread
     const requiredRoleId = threadToRole.get(message.channel.id);
-    // Check if user has the correct role
     const hasCorrectRole = message.member.roles.cache.has(requiredRoleId);
+
     if (hasCorrectRole) {
-        console.log(`${message.author.tag} has the correct role for channel ${message.channel.id}.`);
+        logWithTimestamp(`User ${message.author.tag} has correct role for thread "${threadName}"`, 'ACCESS');
         return;
     }
 
-    // User does not have the correct role
-    console.log(`${message.author.tag} does not have the correct role for channel ${message.channel.id}.`);
-
-    // Find the correct thread for the user
+    // Find correct thread for user
     let userCorrectThreadId = null;
+    let userCorrectThreadName = null;
     for (const [roleId, threadId] of roleToThread) {
         if (message.member.roles.cache.has(roleId)) {
             userCorrectThreadId = threadId;
+            userCorrectThreadName = await getThreadName(threadId);
             break;
         }
     }
 
-    // Check attachments (skip embedding them)
+    // Prepare embed content
     const hasAttachments = message.attachments.size > 0;
-
-    // Check message length before embedding
-    let embedDescription = '[Content omitted]'; // Default placeholder
-    if (hasAttachments) {
-        // If there are attachments, skip including them in the embed
-        embedDescription = 'User uploaded file(s). (Omitting file content in embed.)';
-    } else {
-        // If text is too long, use a placeholder
-        embedDescription = message.content.length > MAX_TEXT_LENGTH
+    let embedDescription = hasAttachments 
+        ? 'User uploaded file(s). (Omitting file content in embed.)'
+        : message.content.length > MAX_TEXT_LENGTH
             ? 'Message content is too long. (Omitting full content.)'
             : message.content;
-    }
 
-    // Build the embed
+    // Create error embed
     const errorEmbed = new EmbedBuilder()
-        .setColor('#FF0000')
+        .setColor(ERROR_COLOR)
         .setTitle('Wrong Thread')
         .setDescription("You've posted in the wrong thread!")
         .addFields(
@@ -115,26 +145,36 @@ client.on('messageCreate', async (message) => {
             {
                 name: 'Correct Thread',
                 value: userCorrectThreadId
-                    ? `<#${userCorrectThreadId}>`
+                    ? `<#${userCorrectThreadId}> (${userCorrectThreadName})`
                     : 'No matching thread found for your roles'
             }
         )
         .setTimestamp();
 
     try {
-        // Send ephemeral reply with the embed
+        // Send warning and delete message
         await message.reply({
             embeds: [errorEmbed],
             ephemeral: true
         });
-        console.log(`Sent warning message to ${message.author.tag}.`);
+        logWithTimestamp(`Sent warning to ${message.author.tag} - should post in "${userCorrectThreadName || 'no thread found'}"`, 'WARNING');
 
-        // Delete the original message
         await message.delete();
-        console.log(`Deleted message from ${message.author.tag}.`);
+        logWithTimestamp(`Deleted incorrect message from ${message.author.tag} in "${threadName}"`, 'MODERATION');
     } catch (error) {
-        console.error('Error handling wrong thread message:', error);
+        logWithTimestamp(`Error handling message in "${threadName}": ${error.message}`, 'ERROR');
+        console.error(error);
     }
 });
 
-client.login(process.env.DISCORD_TOKEN);
+// Error handling for the client
+client.on('error', error => {
+    logWithTimestamp(`Client error: ${error.message}`, 'ERROR');
+    console.error(error);
+});
+
+// Connect to Discord
+client.login(process.env.DISCORD_TOKEN).catch(error => {
+    logWithTimestamp(`Failed to login: ${error.message}`, 'FATAL');
+    process.exit(1);
+});

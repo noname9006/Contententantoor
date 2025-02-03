@@ -227,26 +227,27 @@ client.on('messageCreate', async (message) => {
 
         // Create error embed with exact format
         const errorEmbed = new EmbedBuilder()
-            .setColor(ERROR_COLOR)
-            .setDescription(`Please use the thread that matches your highest role\nYour message has been removed because it was posted in the wrong thread.`)
-            .addFields(
-                {
-                    name: "Here's the right one for you:",
-                    value: userCorrectThreadId
-                        ? `<#${userCorrectThreadId}>`
-                        : 'No matching thread found for your roles'
-                },
-                { 
-                    name: 'Your message content:', 
-                    value: embedDescription
-                }
-            )
-            .setFooter({
-                text: 'Botanix Labs',
-                iconURL: 'https://a-us.storyblok.com/f/1014909/512x512/026e26392f/dark_512-1.png'
-            })
-            .setTimestamp();
-
+  .setColor(ERROR_COLOR)
+  .setDescription(`${message.author}, please use the thread that matches your highest role.
+Your message has been removed because it was posted to a wrong thread.`)
+  .addFields(
+    {
+      name: "Here's the right one for you:",
+      value: userCorrectThreadId
+        ? `<#${userCorrectThreadId}>`
+        : 'No matching thread found for your roles'
+    },
+    { 
+      name: 'Your message content:', 
+      value: embedDescription
+    }
+  )
+  .setFooter({
+    text: 'Botanix Labs',
+    iconURL: 'https://a-us.storyblok.com/f/1014909/512x512/026e26392f/dark_512-1.png'
+  })
+  .setTimestamp();
+  
         try {
             // Send reply and handle message deletion
             const replyMessage = await message.reply({

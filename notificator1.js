@@ -21,7 +21,10 @@ const AUTO_DELETE_TIMER = AUTO_DELETE_TIMER_SECONDS * 1000; // Convert to millis
 
 // Utility function for logging with timestamp
 function logWithTimestamp(message, type = 'INFO') {
-    const timestamp = new Date().toISOString();
+    const date = new Date();
+    const timestamp = date.toISOString()
+        .replace('T', ' ')      // Replace T with space
+        .replace(/\.\d+Z$/, ''); // Remove milliseconds and Z
     console.log(`[${timestamp}] [${type}] ${message}`);
 }
 
@@ -292,19 +295,14 @@ Your message has been removed because it was posted to a wrong thread.`)
         } catch (replyError) {
             logWithTimestamp(`Failed to reply to message: ${replyError.message}`, 'ERROR');
             
-            // Attempt DM as fallback
-            try {
-                await message.author.send({
-                    embeds: [errorEmbed],
-                    content: `Your message in ${threadName} was removed because it was posted in the wrong thread.`
-                });
-
-                if (message.deletable) {
+            // Just try to delete the message if possible
+            if (message.deletable) {
+                try {
                     await message.delete();
-                    logWithTimestamp(`Deleted message and sent DM to ${message.author.tag}`, 'MODERATION');
+                    logWithTimestamp(`Deleted message from ${message.author.tag}`, 'MODERATION');
+                } catch (deleteError) {
+                    logWithTimestamp(`Failed to delete message: ${deleteError.message}`, 'ERROR');
                 }
-            } catch (dmError) {
-                logWithTimestamp(`Failed to notify ${message.author.tag}: ${dmError.message}`, 'ERROR');
             }
         }
     } catch (error) {

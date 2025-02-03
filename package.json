@@ -1,0 +1,17 @@
+{
+  "name": "discord-image-bot",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node --max-old-space-size=600 --expose-gc hash.js",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop discord-image-bot",
+    "pm2:restart": "pm2 restart discord-image-bot",
+    "pm2:logs": "pm2 logs discord-image-bot",
+    "pm2:monitor": "pm2 monit discord-image-bot",
+    "pm2:delete": "pm2 delete discord-image-bot"
+  },
+  "dependencies": {
+    "discord.js": "^14.x",
+    "dotenv": "^16.x"
+  }
+}

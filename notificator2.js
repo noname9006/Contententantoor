@@ -19,6 +19,12 @@ const RATE_LIMIT_COOLDOWN = 5000; // 5 seconds
 const AUTO_DELETE_TIMER_SECONDS = parseInt(process.env.AUTO_DELETE_TIMER) || 30; // Default to 30 seconds
 const AUTO_DELETE_TIMER = AUTO_DELETE_TIMER_SECONDS * 1000; // Convert to milliseconds
 
+// Utility function for logging with timestamp
+function logWithTimestamp(message, type = 'INFO') {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] [${type}] ${message}`);
+}
+
 // Rate limiting
 const rateLimitMap = new Map();
 
@@ -27,16 +33,12 @@ function checkRateLimit(userId) {
     const userRateLimit = rateLimitMap.get(userId);
     
     if (userRateLimit && now - userRateLimit < RATE_LIMIT_COOLDOWN) {
+        logWithTimestamp(`Rate limit hit for user ID: ${userId}`, 'RATELIMIT');
         return true;
     }
     
     rateLimitMap.set(userId, now);
     return false;
-}
-
-// Get formatted UTC timestamp in specific format
-function getFormattedTimestamp() {
-    return `Current Date and Time (UTC - YYYY-MM-DD HH:MM:SS formatted): ${new Date().toISOString().replace('T', ' ').slice(0, 19)}`;
 }
 
 // Environment variable validation
@@ -60,7 +62,7 @@ function validateEnvironmentVariables() {
 
     const missingVariables = requiredVariables.filter(varName => !process.env[varName]);
     if (missingVariables.length > 0) {
-        console.log(`Missing environment variables: ${missingVariables.join(', ')}`);
+        logWithTimestamp(`Missing environment variables: ${missingVariables.join(', ')}`, 'ERROR');
         process.exit(1);
     }
 
@@ -72,7 +74,7 @@ function validateEnvironmentVariables() {
     idVariables.forEach(varName => {
         const value = process.env[varName];
         if (!/^\d+$/.test(value)) {
-            console.log(`Invalid Discord ID format for ${varName}: ${value}`);
+            logWithTimestamp(`Invalid Discord ID format for ${varName}: ${value}`, 'ERROR');
             process.exit(1);
         }
     });
@@ -80,7 +82,7 @@ function validateEnvironmentVariables() {
     // Validate AUTO_DELETE_TIMER
     const timer = parseInt(process.env.AUTO_DELETE_TIMER);
     if (isNaN(timer) || timer < 0) {
-        console.log('Invalid AUTO_DELETE_TIMER value. Must be a positive number of seconds.');
+        logWithTimestamp('Invalid AUTO_DELETE_TIMER value. Must be a positive number of seconds.', 'ERROR');
         process.exit(1);
     }
 }
@@ -123,14 +125,14 @@ async function getThreadName(threadId) {
     try {
         const channel = await client.channels.fetch(threadId);
         if (!channel) {
-            console.log(`Thread ${threadId} not found`);
+            logWithTimestamp(`Thread ${threadId} not found`, 'ERROR');
             return threadId;
         }
         const threadName = channel.name;
         threadNameCache.set(threadId, threadName);
         return threadName;
     } catch (error) {
-        console.log(`Error fetching thread ${threadId}: ${error.message}`);
+        logWithTimestamp(`Error fetching thread ${threadId}: ${error.message}`, 'ERROR');
         return threadId;
     }
 }
@@ -139,7 +141,7 @@ async function getThreadName(threadId) {
 function checkBotPermissions(guild, channel) {
     const botMember = guild.members.cache.get(client.user.id);
     if (!botMember) {
-        console.log('Bot member not found in guild');
+        logWithTimestamp('Bot member not found in guild', 'ERROR');
         return false;
     }
 
@@ -152,7 +154,7 @@ function checkBotPermissions(guild, channel) {
 
     const missingPermissions = requiredPermissions.filter(perm => !botMember.permissions.has(perm));
     if (missingPermissions.length > 0) {
-        console.log(`Missing permissions in ${channel.name}: ${missingPermissions.join(', ')}`);
+        logWithTimestamp(`Missing permissions in ${channel.name}: ${missingPermissions.join(', ')}`, 'ERROR');
         return false;
     }
 
@@ -161,13 +163,13 @@ function checkBotPermissions(guild, channel) {
 
 // Event handler for when the bot is ready
 client.once('ready', async () => {
-    console.log('Bot is ready and online!');
-    console.log(`Auto-delete timer set to ${AUTO_DELETE_TIMER_SECONDS} seconds`);
+    logWithTimestamp('Bot is ready and online!', 'STARTUP');
+    logWithTimestamp(`Auto-delete timer set to ${AUTO_DELETE_TIMER_SECONDS} seconds`, 'CONFIG');
     
     // Initialize thread name cache and log monitored threads
     for (const threadId of threadToRole.keys()) {
         const threadName = await getThreadName(threadId);
-        console.log(`Monitoring thread: ${threadName}`);
+        logWithTimestamp(`Monitoring thread: ${threadName}`, 'CONFIG');
     }
 });
 
@@ -179,9 +181,11 @@ client.on('messageCreate', async (message) => {
         if (!message.guild || !message.member) return;
         if (!threadToRole.has(message.channel.id)) return;
 
+        const threadName = await getThreadName(message.channel.id);
+        logWithTimestamp(`Message received in "${threadName}" from ${message.author.tag}`, 'MESSAGE');
+
         // Rate limit check
         if (checkRateLimit(message.author.id)) {
-            console.log(`Rate limit hit for user ${message.author.tag}`);
             return;
         }
 
@@ -190,13 +194,12 @@ client.on('messageCreate', async (message) => {
             return;
         }
 
-        const threadName = await getThreadName(message.channel.id);
-
         // Check for ignored roles
         const hasIgnoredRole = message.member.roles.cache.some(role => 
             ignoredRoles.has(role.id)
         );
         if (hasIgnoredRole) {
+            logWithTimestamp(`User ${message.author.tag} has an ignored role - message allowed in "${threadName}"`, 'ROLE');
             return;
         }
 
@@ -205,6 +208,7 @@ client.on('messageCreate', async (message) => {
         const hasCorrectRole = message.member.roles.cache.has(requiredRoleId);
 
         if (hasCorrectRole) {
+            logWithTimestamp(`User ${message.author.tag} has correct role for "${threadName}"`, 'ACCESS');
             return;
         }
 
@@ -225,30 +229,32 @@ client.on('messageCreate', async (message) => {
                 ? message.content.substring(0, MAX_TEXT_LENGTH) + '...'
                 : message.content || 'No content';
 
-        // Create error embed with exact format
+        // Create error embed
         const errorEmbed = new EmbedBuilder()
-  .setColor(ERROR_COLOR)
-  .setDescription(`${message.author}, please use the thread that matches your highest role.
+            .setColor(ERROR_COLOR)
+            .setDescription(`${message.author}, please use the thread that matches your highest role.
 Your message has been removed because it was posted to a wrong thread.`)
-  .addFields(
-    {
-      name: "Here's the right one for you:",
-      value: userCorrectThreadId
-        ? `<#${userCorrectThreadId}>`
-        : 'No matching thread found for your roles'
-    },
-    { 
-      name: 'Your message content:', 
-      value: embedDescription
-    }
-  )
-  .setFooter({
-    text: 'Botanix Labs',
-    iconURL: 'https://a-us.storyblok.com/f/1014909/512x512/026e26392f/dark_512-1.png'
-  })
-  .setTimestamp();
-  
+            .addFields(
+                {
+                    name: "Here's the right one for you:",
+                    value: userCorrectThreadId
+                        ? `<#${userCorrectThreadId}>`
+                        : 'No matching thread found for your roles'
+                },
+                { 
+                    name: 'Your message content:', 
+                    value: embedDescription
+                }
+            )
+            .setFooter({
+                text: 'Botanix Labs',
+                iconURL: 'https://a-us.storyblok.com/f/1014909/512x512/026e26392f/dark_512-1.png'
+            })
+            .setTimestamp();
+
         try {
+            logWithTimestamp(`User ${message.author.tag} posted in wrong thread "${threadName}"`, 'WARNING');
+            
             // Send reply and handle message deletion
             const replyMessage = await message.reply({
                 embeds: [errorEmbed]
@@ -259,6 +265,7 @@ Your message has been removed because it was posted to a wrong thread.`)
 
             if (message.deletable) {
                 await message.delete();
+                logWithTimestamp(`Deleted message from ${message.author.tag} in "${threadName}"`, 'MODERATION');
             }
 
             // Delete reply after the configured time
@@ -267,14 +274,15 @@ Your message has been removed because it was posted to a wrong thread.`)
                     try {
                         if (replyMessage.deletable) {
                             await replyMessage.delete();
+                            logWithTimestamp(`Deleted reply message in "${threadName}"`, 'CLEANUP');
                         }
                     } catch (deleteError) {
-                        console.log(`Failed to delete reply message: ${deleteError.message}`);
+                        logWithTimestamp(`Failed to delete reply message: ${deleteError.message}`, 'ERROR');
                     }
                 }, AUTO_DELETE_TIMER);
             }
         } catch (replyError) {
-            console.log(`Failed to reply to message: ${replyError.message}`);
+            logWithTimestamp(`Failed to reply to message: ${replyError.message}`, 'ERROR');
             
             // Attempt DM as fallback
             try {
@@ -285,31 +293,32 @@ Your message has been removed because it was posted to a wrong thread.`)
 
                 if (message.deletable) {
                     await message.delete();
+                    logWithTimestamp(`Deleted message and sent DM to ${message.author.tag}`, 'MODERATION');
                 }
             } catch (dmError) {
-                console.log(`Failed to notify ${message.author.tag}: ${dmError.message}`);
+                logWithTimestamp(`Failed to notify ${message.author.tag}: ${dmError.message}`, 'ERROR');
             }
         }
     } catch (error) {
-        console.log(`Error processing message: ${error.message}`);
-        console.log(`Error stack: ${error.stack}`);
+        logWithTimestamp(`Error processing message: ${error.message}`, 'ERROR');
+        logWithTimestamp(`Error stack: ${error.stack}`, 'ERROR');
     }
 });
 
 // Error handling
 client.on('error', error => {
-    console.log(`Client error: ${error.message}`);
+    logWithTimestamp(`Client error: ${error.message}`, 'ERROR');
 });
 
 // Graceful shutdown handling
 process.on('SIGINT', () => {
-    console.log('Received SIGINT. Shutting down gracefully...');
+    logWithTimestamp('Received SIGINT. Shutting down gracefully...', 'SHUTDOWN');
     client.destroy();
     process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-    console.log('Received SIGTERM. Shutting down gracefully...');
+    logWithTimestamp('Received SIGTERM. Shutting down gracefully...', 'SHUTDOWN');
     client.destroy();
     process.exit(0);
 });
@@ -319,6 +328,6 @@ validateEnvironmentVariables();
 
 // Connect to Discord
 client.login(process.env.DISCORD_TOKEN).catch(error => {
-    console.log(`Failed to login: ${error.message}`);
+    logWithTimestamp(`Failed to login: ${error.message}`, 'FATAL');
     process.exit(1);
 });

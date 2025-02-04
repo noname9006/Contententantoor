@@ -5,9 +5,31 @@ const https = require('https');
 const path = require('path');
 require('dotenv').config();
 
+// Helper function to format elapsed time
+function formatElapsedTime(seconds) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const remainingSeconds = Math.floor(seconds % 60);
+
+    if (hours > 0) {
+        return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
+    } else {
+        return `${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
+    }
+}
+
+// Helper function to format current time in YYYY-MM-DD HH:MM:SS format
+function getCurrentFormattedTime() {
+    const now = new Date();
+    return now.toISOString()
+              .replace('T', ' ')
+              .split('.')[0];
+}
+
 // Bot information
 const BOT_INFO = {
-    startTime: '2025-02-03 20:51:44',
+    startTime: getCurrentFormattedTime(),
+    operator: 'noname9006',
     memoryLimit: 800 // MB
 };
 
@@ -25,7 +47,7 @@ if (!fs.existsSync(LOG_CONFIG.logDir)) {
 // Compact logging function
 function logMessage(type, content, elapsedTime = null) {
     const timestamp = new Date().toISOString();
-    const logMessage = `[${timestamp}] ${type}: ${JSON.stringify(content)}${elapsedTime ? ` | Elapsed Time: ${elapsedTime} seconds` : ''}\n`;
+    const logMessage = `[${timestamp}] ${type}: ${JSON.stringify(content)}${elapsedTime ? ` | Elapsed Time: ${elapsedTime}` : ''}\n`;
     
     // Console output
     console.log(logMessage.trim());
@@ -109,7 +131,7 @@ async function generateReport(channelId, imageDatabase) {
     writeStream.write(
         `# Analysis performed by: ${BOT_INFO.operator}\n` +
         `# Analysis start time: ${BOT_INFO.startTime} UTC\n` +
-        `# Report generated at: ${new Date().toISOString().replace('T', ' ').split('.')[0]} UTC\n\n` +
+        `# Report generated at: ${getCurrentFormattedTime()} UTC\n\n` +
         'Original Message Link,Original Poster,Number of Duplicates,Users Who Reposted,Stolen Reposts,Self-Reposts\n'
     );
 
@@ -144,8 +166,8 @@ async function generateReport(channelId, imageDatabase) {
 
 // Command handler
 async function handleCheckCommand(message, channelId) {
+    const commandStartTime = Date.now();
     try {
-        const commandStartTime = Date.now();
         const initialMemory = checkMemoryUsage();
         
         const channel = await client.channels.fetch(channelId);
@@ -155,7 +177,7 @@ async function handleCheckCommand(message, channelId) {
         }
 
         const statusMessage = await message.reply('Starting channel analysis... This might take a while.');
-        logMessage('MESSAGE_SENT', { content: 'Starting channel analysis... This might take a while.' }, (Date.now() - commandStartTime) / 1000);
+        logMessage('MESSAGE_SENT', { content: 'Starting channel analysis... This might take a while.' }, formatElapsedTime((Date.now() - commandStartTime) / 1000));
 
         // Clear previous data and run garbage collection
         imageDatabase.clear();
@@ -166,6 +188,8 @@ async function handleCheckCommand(message, channelId) {
         // Count total messages in the channel
         const totalMessages = await countTotalMessages(channel);
         logMessage('TOTAL_MESSAGES', { totalMessages });
+        
+        await statusMessage.edit(`Starting analysis of ${totalMessages} total messages... This might take a while.`);
 
         let processedMessages = 0;
         let processedImages = 0;
@@ -237,8 +261,8 @@ async function handleCheckCommand(message, channelId) {
 
             if (processedMessages % 100 === 0) {
                 const currentTime = Date.now();
-                const elapsedTime = (currentTime - startTime) / 1000; // Time in seconds
-                const totalElapsedTime = (currentTime - commandStartTime) / 1000; // Time in seconds since command start
+                const elapsedTime = (currentTime - startTime) / 1000;
+                const totalElapsedTime = (currentTime - commandStartTime) / 1000;
                 timeEstimates.push(elapsedTime);
                 const avgTimePer100 = timeEstimates.reduce((a, b) => a + b, 0) / timeEstimates.length;
                 const remainingMessages = totalMessages - processedMessages;
@@ -249,15 +273,14 @@ async function handleCheckCommand(message, channelId) {
                     global.gc();
                 }
 
-                const statusUpdate = `Processing... Analyzed ${processedMessages} messages, ` +
-                                     `${processedImages} images, found ${duplicatesFound} duplicates. ` +
-                                     `Estimated time left: ${Math.round(estimatedTimeLeft)} seconds. ` +
-                                     `Average time per 100 messages: ${Math.round(avgTimePer100)} seconds. ` +
-                                     `Elapsed time: ${Math.round(totalElapsedTime)} seconds.`;
+                const statusUpdate = `Processing... Analyzed ${processedMessages}/${totalMessages} messages, ` +
+                                   `${processedImages} images, found ${duplicatesFound} duplicates. ` +
+                                   `Estimated time left: ${formatElapsedTime(estimatedTimeLeft)}. ` +
+                                   `Average time per 100 messages: ${formatElapsedTime(avgTimePer100)}. ` +
+                                   `Elapsed time: ${formatElapsedTime(totalElapsedTime)}.`;
                 await statusMessage.edit(statusUpdate);
-                logMessage('MESSAGE_SENT', { content: statusUpdate }, totalElapsedTime);
+                logMessage('MESSAGE_SENT', { content: statusUpdate }, formatElapsedTime(totalElapsedTime));
 
-                // Reset start time for next 100 messages
                 startTime = currentTime;
             }
         }
@@ -271,38 +294,41 @@ async function handleCheckCommand(message, channelId) {
         }
 
         const finalStats = {
-            totalMessages: processedMessages,
+            totalMessages: totalMessages,
+            processedMessages: processedMessages,
             totalImages: processedImages,
             uniqueImages: imageDatabase.size,
             totalDuplicates: duplicatesFound,
             finalMemoryMB: checkMemoryUsage()
         };
 
-        const totalElapsedTime = (Date.now() - commandStartTime) / 1000; // Time in seconds since command start
+        const totalElapsedTime = (Date.now() - commandStartTime) / 1000;
         const finalMessage = `Analysis complete!\n` +
-                             `Messages processed: ${finalStats.totalMessages}\n` +
-                             `Total images: ${finalStats.totalImages}\n` +
-                             `Unique images: ${finalStats.uniqueImages}\n` +
-                             `Duplicates found: ${finalStats.totalDuplicates}\n` +
-                             `Elapsed time: ${Math.round(totalElapsedTime)} seconds.`;
+                           `Total messages in channel: ${finalStats.totalMessages}\n` +
+                           `Messages processed: ${finalStats.processedMessages}\n` +
+                           `Total images: ${finalStats.totalImages}\n` +
+                           `Unique images: ${finalStats.uniqueImages}\n` +
+                           `Duplicates found: ${finalStats.totalDuplicates}\n` +
+                           `Elapsed time: ${formatElapsedTime(totalElapsedTime)}`;
         await message.reply({
             content: finalMessage,
             files: [fileName]
         });
-        logMessage('MESSAGE_SENT', { content: finalMessage }, totalElapsedTime);
+        logMessage('MESSAGE_SENT', { content: finalMessage }, formatElapsedTime(totalElapsedTime));
 
         // Cleanup
         fs.unlinkSync(fileName);
         
         logMessage('COMMAND_COMPLETE', {
-            totalMessages: processedMessages,
+            totalMessages: totalMessages,
+            processedMessages: processedMessages,
             totalImages: processedImages,
             uniqueImages: imageDatabase.size,
             totalDuplicates: duplicatesFound
         });
 
     } catch (error) {
-        const totalElapsedTime = (Date.now() - commandStartTime) / 1000; // Time in seconds since command start
+        const totalElapsedTime = (Date.now() - commandStartTime) / 1000;
         const errorMessage = 'An error occurred while processing the command.';
         logMessage('ERROR', {
             error: error.message,
@@ -310,7 +336,7 @@ async function handleCheckCommand(message, channelId) {
             channelId,
             memoryUsageMB: checkMemoryUsage()
         });
-        logMessage('MESSAGE_SENT', { content: errorMessage }, totalElapsedTime);
+        logMessage('MESSAGE_SENT', { content: errorMessage }, formatElapsedTime(totalElapsedTime));
         
         message.reply(errorMessage);
     }

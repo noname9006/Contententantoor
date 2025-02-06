@@ -8,7 +8,6 @@ require('dotenv').config();
 // Bot information
 const BOT_INFO = {
     startTime: new Date().toISOString().replace('T', ' ').split('.')[0],
-    operator: 'noname9006',
     memoryLimit: 800, // MB
     similarityThreshold: 12,
     version: '1.1.0'
@@ -16,7 +15,7 @@ const BOT_INFO = {
 
 // Enhanced logging utilities
 const LOGGING_UTILS = {
-    startTime: '2025-02-06 10:10:42', // Current UTC time
+    startTime: '2025-02-06 10:14:59', // Current UTC time
     operator: 'noname9006',
     
     // Enhanced memory logging
@@ -99,7 +98,6 @@ const LOG_CONFIG = {
 if (!fs.existsSync(LOG_CONFIG.logDir)) {
     fs.mkdirSync(LOG_CONFIG.logDir);
 }
-
 // Initialize the client with proper intents
 const client = new Client({
     intents: [
@@ -196,6 +194,7 @@ function discreteWaveletTransform(pixels, width, height) {
     
     return pixels;
 }
+
 // Hash comparison function
 function hammingDistance(hash1, hash2) {
     const binary1 = BigInt(`0x${hash1}`).toString(2).padStart(64, '0');
@@ -210,7 +209,6 @@ function hammingDistance(hash1, hash2) {
     
     return distance;
 }
-
 // Image hash generation
 async function getImageHash(url) {
     return new Promise((resolve, reject) => {
@@ -259,7 +257,6 @@ async function checkChannelPermissions(channel) {
         throw new Error('Channel object is null or undefined');
     }
 
-    // Allow both text channels and forums
     if (!channel.isTextBased() && !channel.isThread() && channel.type !== 15) {
         throw new Error('This channel must be a text channel, thread, or forum');
     }
@@ -335,7 +332,8 @@ async function getAllChannelThreads(channel) {
         throw new Error(`Failed to fetch channel threads: ${error.message}`);
     }
 }
-// Message processing for both channel types
+
+// Message processing function
 async function processMessages(channel, imageDatabase, context = '') {
     await checkChannelPermissions(channel);
 
@@ -344,7 +342,7 @@ async function processMessages(channel, imageDatabase, context = '') {
         processedImages: 0,
         duplicatesFound: 0,
         lastLogTime: Date.now(),
-        logInterval: 5000, // Log every 5 seconds
+        logInterval: 5000 // Log every 5 seconds
     };
 
     let lastMessageId;
@@ -383,7 +381,6 @@ async function processMessages(channel, imageDatabase, context = '') {
                     try {
                         const hash = await getImageHash(attachment.url);
                         
-                        // Log processing milestone every 100 images
                         if (processingStats.processedImages % 100 === 0) {
                             LOGGING_UTILS.logEnhanced({
                                 type: 'PROCESSING_MILESTONE',
@@ -398,9 +395,34 @@ async function processMessages(channel, imageDatabase, context = '') {
                             });
                         }
 
-                        // Process image hash...
-                        // [Rest of the image processing logic remains the same]
-                        
+                        if (imageDatabase.has(hash)) {
+                            processingStats.duplicatesFound++;
+                            imageDatabase.get(hash).duplicates.push({
+                                id: msg.id,
+                                url: msg.url,
+                                author: {
+                                    username: msg.author.username,
+                                    id: msg.author.id
+                                },
+                                timestamp: msg.createdTimestamp,
+                                location: context,
+                                similarityScore: '100.00'
+                            });
+                        } else {
+                            imageDatabase.set(hash, {
+                                originalMessage: {
+                                    id: msg.id,
+                                    url: msg.url,
+                                    author: {
+                                        username: msg.author.username,
+                                        id: msg.author.id
+                                    },
+                                    timestamp: msg.createdTimestamp,
+                                    location: context
+                                },
+                                duplicates: []
+                            });
+                        }
                     } catch (error) {
                         LOGGING_UTILS.logEnhanced({
                             type: 'IMAGE_PROCESSING_ERROR',
@@ -424,7 +446,6 @@ async function processMessages(channel, imageDatabase, context = '') {
         messages.clear();
     }
 
-    // Final processing summary
     LOGGING_UTILS.logEnhanced({
         type: 'PROCESSING_SUMMARY',
         data: {
@@ -443,12 +464,12 @@ async function processMessages(channel, imageDatabase, context = '') {
         duplicatesFound: processingStats.duplicatesFound
     };
 }
-
 // Report generation
 async function generateReport(channelId, imageDatabase) {
     const fileName = `duplicate_report_${channelId}_${Date.now()}.csv`;
     const writeStream = fs.createWriteStream(fileName);
 
+    // Write header
     writeStream.write(
         `# Forum/Channel Analysis Report (Wavelet Hash)\n` +
         `# Channel ID: ${channelId}\n` +
@@ -501,7 +522,6 @@ async function generateReport(channelId, imageDatabase) {
     await new Promise(resolve => writeStream.end(resolve));
     return fileName;
 }
-
 // Main command handler
 async function handleCheckCommand(message, channelId) {
     const commandStartTime = Date.now();
@@ -546,7 +566,6 @@ async function handleCheckCommand(message, channelId) {
             `Starting Wavelet Hash analysis of ${totalMessages.toLocaleString()} total messages ${analysisScope}...`
         );
 
-        // Clear previous data and run garbage collection
         imageDatabase.clear();
         if (global.gc) {
             global.gc();
@@ -556,16 +575,14 @@ async function handleCheckCommand(message, channelId) {
         let duplicatesFound = 0;
         let startTime = Date.now();
 
-        // Process main channel if it's a text channel
         if (!isForumChannel) {
-            const results = await processChannelContent(channel, imageDatabase, `channel-${channel.name}`);
+            const results = await processMessages(channel, imageDatabase, `channel-${channel.name}`);
             processedImages += results.processedImages;
             duplicatesFound += results.duplicatesFound;
         }
 
-        // Process forum posts/threads
         for (const thread of allThreads) {
-            const threadResults = await processChannelContent(thread, imageDatabase, `${isForumChannel ? 'forum-post' : 'thread'}-${thread.name}`);
+            const threadResults = await processMessages(thread, imageDatabase, `${isForumChannel ? 'forum-post' : 'thread'}-${thread.name}`);
             processedImages += threadResults.processedImages;
             duplicatesFound += threadResults.duplicatesFound;
 
@@ -577,7 +594,6 @@ async function handleCheckCommand(message, channelId) {
             );
         }
 
-        // Generate report
         const reportFile = await generateReport(channelId, imageDatabase);
         const elapsedTime = formatElapsedTime((Date.now() - commandStartTime) / 1000);
 
@@ -661,11 +677,9 @@ client.on(Events.MessageCreate, async message => {
 
     if (message.content.startsWith('!check')) {
         const channelId = message.content.split(' ')[1];
-        
         if (!channelId) {
             return message.reply('Please provide a channel ID. Usage: !check <channelId>');
         }
-        
         await handleCheckCommand(message, channelId);
     }
 
@@ -699,7 +713,6 @@ client.on(Events.Error, error => {
     });
 });
 
-// Process error handling
 process.on('unhandledRejection', error => {
     logMessage('UNHANDLED_REJECTION', {
         error: error.message,
@@ -715,7 +728,6 @@ process.on('uncaughtException', error => {
     process.exit(1);
 });
 
-// Startup checks
 if (!process.env.DISCORD_BOT_TOKEN) {
     logMessage('STARTUP_ERROR', 'No Discord bot token found in environment variables!');
     process.exit(1);
@@ -750,7 +762,7 @@ module.exports = {
     discreteWaveletTransform,
     countTotalMessages,
     getAllChannelThreads,
-    processChannelContent,
+    processMessages,
     generateReport,
     checkMemoryUsage,
     BOT_INFO,

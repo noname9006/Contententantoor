@@ -12,7 +12,10 @@ const BOT_INFO = {
     startTime: '2025-02-06 11:58:41',
     operator: 'noname9006',
     memoryLimit: 800,
-    similarityThreshold: 12,
+    // Lower similarity threshold means a tighter match.
+    similarityThreshold: 2,
+    // New pixel difference threshold - the average absolute difference of pixels must be below this value.
+    pixelSimilarityThreshold: 15,
     version: '1.1.0',
     outputDir: `duplicates_${new Date().toISOString().replace(/[:.]/g, '-')}`
 };
@@ -22,7 +25,7 @@ const LOGGING_UTILS = {
     logDir: 'logs',
     startTime: '2025-02-06 11:58:41',
     operator: 'noname9006',
-    
+
     detailedMemoryLog() {
         const memoryUsage = process.memoryUsage();
         return {
@@ -36,6 +39,14 @@ const LOGGING_UTILS = {
                 arrayBuffers: `${(memoryUsage.arrayBuffers / 1024 / 1024).toFixed(2)}MB`
             }
         };
+    },
+
+    calculateETA(current, total, startTime = Date.now()) {
+        const elapsedMs = Date.now() - startTime;
+        const estimatedTotalMs = (elapsedMs / current) * total;
+        const remainingMs = estimatedTotalMs - elapsedMs;
+        const remainingMinutes = Math.ceil(remainingMs / 60000);
+        return `~${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''} remaining`;
     },
 
     calculateProgress(current, total) {
@@ -64,14 +75,6 @@ const LOGGING_UTILS = {
                 elapsedSeconds: elapsedSeconds.toFixed(1)
             }
         };
-    },
-
-    calculateETA(current, total, startTime) {
-        const elapsedMs = Date.now() - startTime;
-        const estimatedTotalMs = (elapsedMs / current) * total;
-        const remainingMs = estimatedTotalMs - elapsedMs;
-        const remainingMinutes = Math.ceil(remainingMs / 60000);
-        return `~${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''} remaining`;
     },
 
     logEnhanced(data) {
@@ -114,7 +117,8 @@ const client = new Client({
 });
 
 // Initialize image database and required data structures
-const imageDatabase = new Map();
+// Each entry now stores the wavelet hash and the raw pixel data.
+const imageDatabase = [];
 const processingQueue = new Map();
 const statisticsCache = new Map();
 const activeProcesses = new Set();
@@ -125,7 +129,7 @@ const databaseMetadata = {
     created: '2025-02-06 11:56:54',
     owner: 'noname9006',
     cleanupInterval: 1000 * 60 * 60, // 1 hour
-    maxCacheAge: 1000 * 60 * 60 * 24 // 24 hours
+    maxCacheAge: 1000 * 60 * 60 * 24   // 24 hours
 };
 
 // Initialize database cleanup interval
@@ -135,112 +139,36 @@ setInterval(() => {
     }
 }, databaseMetadata.cleanupInterval);
 
-    // Progress tracking
-    calculateProgress: function(current, total) {
-        const percentage = ((current / total) * 100).toFixed(2);
-        const estimatedTimeRemaining = this.calculateETA(current, total);
-        return {
-            type: 'PROGRESS_UPDATE',
-            timestamp: new Date().toISOString(),
-            data: {
-                percentage: `${percentage}%`,
-                current,
-                total,
-                estimatedTimeRemaining
-            }
-        };
-    },
-
-    // Processing rate calculation
-    calculateProcessingRate: function(processedItems, elapsedSeconds) {
-        const rate = processedItems / (elapsedSeconds || 1);
-        return {
-            type: 'PROCESSING_RATE',
-            timestamp: new Date().toISOString(),
-            data: {
-                itemsPerSecond: rate.toFixed(2),
-                totalProcessed: processedItems,
-                elapsedSeconds: elapsedSeconds.toFixed(1)
-            }
-        };
-    },
-
-    // ETA calculation
-    calculateETA: function(current, total, startTime) {
-        const elapsedMs = Date.now() - startTime;
-        const estimatedTotalMs = (elapsedMs / current) * total;
-        const remainingMs = estimatedTotalMs - elapsedMs;
-        const remainingMinutes = Math.ceil(remainingMs / 60000);
-        
-        return `~${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''} remaining`;
-    },
-
-    // Enhanced log message
-    logEnhanced: function(data) {
-        const logEntry = {
-            timestamp: new Date().toISOString(),
-            operator: this.operator,
-            ...data
-        };
-
-        const logMessage = `[${logEntry.timestamp}] ${logEntry.type}: ${JSON.stringify(logEntry.data)}\n`;
-        console.log(logMessage.trim());
-        fsPromises.appendFile(path.join(this.logDir, `bot_log_${this.startTime.split(' ')[0]}.log`), logMessage)
-            .catch(error => console.error('Logging error:', error));
-
+// Helper function to compute the median of an array
+function median(values) {
+    if (values.length === 0) return 0;
+    const sorted = Array.from(values).sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    if (sorted.length % 2) {
+        return sorted[mid];
+    } else {
+        return (sorted[mid - 1] + sorted[mid]) / 2;
     }
-};
+}
 
-// Logging configuration
-const LOG_CONFIG = {
-    logDir: 'logs',
-    logFile: `bot_log_${BOT_INFO.startTime.split(' ')[0]}.log`
-};
-
-// Create logs directory - separate from LOG_CONFIG
-(async () => {
-    try {
-        await fsPromises.mkdir(LOG_CONFIG.logDir, { recursive: true });
-    } catch (error) {
-        console.error('Error creating log directory:', error);
+// Compare two 32x32 pixel arrays (Uint8Array or Buffer)
+// Returns the average absolute difference over all pixels.
+function comparePixelData(data1, data2) {
+    if (data1.length !== data2.length) return Infinity;
+    let totalDifference = 0;
+    for (let i = 0; i < data1.length; i++) {
+        totalDifference += Math.abs(data1[i] - data2[i]);
     }
-})();
+    return totalDifference / data1.length;
+}
 
-// Initialize the client with proper intents
-const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMembers
-    ]
-});
-
-// Create logs directory if it doesn't exist
-fs.mkdir(LOG_CONFIG.logDir, { recursive: true })
-    .catch(error => console.error('Error creating log directory:', error));
-
-// Initialize image database and required data structures
-const imageDatabase = new Map();
-const processingQueue = new Map();
-const statisticsCache = new Map();
-const activeProcesses = new Set();
-
-// Database operation timestamps
-const databaseMetadata = {
-    lastCleanup: Date.now(),
-    created: '2025-02-06 11:46:37',
-    owner: 'noname9006',
-    cleanupInterval: 1000 * 60 * 60, // 1 hour
-    maxCacheAge: 1000 * 60 * 60 * 24 // 24 hours
-};
 // Command handling function
 async function handleCheckCommand(message, channelId) {
     const commandStartTime = Date.now();
     let statusMessage = null;
     
     try {
-        const initialMemory = checkMemoryUsage();
+        checkMemoryUsage();
         
         if (!channelId.match(/^\d+$/)) {
             throw new Error('Invalid channel ID format');
@@ -261,9 +189,9 @@ async function handleCheckCommand(message, channelId) {
             'Starting Wavelet Hash analysis... This might take a while.'
         );
 
-        // Create output directory for this analysis
+        // Create output directory for this analysis using fsPromises.mkdir
         const analysisDir = BOT_INFO.outputDir;
-        await fs.mkdir(analysisDir, { recursive: true });
+        await fsPromises.mkdir(analysisDir, { recursive: true });
 
         LOGGING_UTILS.logEnhanced({
             type: 'ANALYSIS_START',
@@ -332,12 +260,6 @@ async function handleCheckCommand(message, channelId) {
         }
     }
 }
-// Initialize database event handlers
-setInterval(() => {
-    if (Date.now() - databaseMetadata.lastCleanup > databaseMetadata.cleanupInterval) {
-        cleanupDatabase();
-    }
-}, databaseMetadata.cleanupInterval);
 
 function cleanupDatabase() {
     const now = Date.now();
@@ -353,7 +275,7 @@ function cleanupDatabase() {
         data: {
             timestamp: getCurrentFormattedTime(),
             cacheSize: statisticsCache.size,
-            databaseSize: imageDatabase.size,
+            databaseSize: imageDatabase.length,
             memoryUsage: LOGGING_UTILS.detailedMemoryLog().data
         }
     });
@@ -388,7 +310,7 @@ async function downloadImage(url, folderPath, filename) {
                     return;
                 }
 
-                const fileStream = fs.createWriteStream(filepath);  // Now this will work
+                const fileStream = fs.createWriteStream(filepath);
                 response.pipe(fileStream);
 
                 fileStream.on('finish', () => {
@@ -397,7 +319,7 @@ async function downloadImage(url, folderPath, filename) {
                 });
 
                 fileStream.on('error', (err) => {
-                    fs.unlink(filepath).catch(() => {});
+                    fs.unlink(filepath, () => {});
                     reject(err);
                 });
             }).on('error', reject);
@@ -441,8 +363,8 @@ function haar1D(data, size) {
     for (let i = 0; i < size; i += 2) {
         const avg = (data[i] + data[i + 1]) / 2;
         const diff = (data[i] - data[i + 1]) / 2;
-        temp[i/2] = avg;
-        temp[size/2 + i/2] = diff;
+        temp[i / 2] = avg;
+        temp[size / 2 + i / 2] = diff;
     }
     
     for (let i = 0; i < size; i++) {
@@ -479,7 +401,7 @@ function discreteWaveletTransform(pixels, width, height) {
     return pixels;
 }
 
-// Hash comparison function
+// Hash comparison function using Hamming distance
 function hammingDistance(hash1, hash2) {
     const binary1 = BigInt(`0x${hash1}`).toString(2).padStart(64, '0');
     const binary2 = BigInt(`0x${hash2}`).toString(2).padStart(64, '0');
@@ -494,6 +416,7 @@ function hammingDistance(hash1, hash2) {
     return distance;
 }
 
+// getImageHash now returns an object with both the hash and the 32x32 greyscale pixel data.
 async function getImageHash(url) {
     return new Promise((resolve, reject) => {
         https.get(url, (response) => {
@@ -502,30 +425,36 @@ async function getImageHash(url) {
             response.on('end', async () => {
                 try {
                     const buffer = Buffer.concat(chunks);
-                    const pixels = await sharp(buffer)
+                    // Obtain a 32x32 greyscale image buffer
+                    const pixelBuffer = await sharp(buffer)
                         .greyscale()
                         .resize(32, 32, { fit: 'fill' })
                         .raw()
                         .toBuffer();
-
-                    const floatPixels = new Float32Array(32 * 32);
-                    for (let i = 0; i < pixels.length; i++) {
-                        floatPixels[i] = pixels[i];
+                        
+                    // Create a Float32Array for performing the wavelet transform
+                    const floatPixels = new Float32Array(pixelBuffer.length);
+                    for (let i = 0; i < pixelBuffer.length; i++) {
+                        floatPixels[i] = pixelBuffer[i];
                     }
 
                     const wavelets = discreteWaveletTransform(floatPixels, 32, 32);
+
+                    // Use the first 64 coefficients to compute a hash, using the median as threshold.
+                    const coeffs = Array.from(wavelets.slice(0, 64));
+                    const threshold = median(coeffs);
                     
                     let hash = 0n;
-                    const threshold = Array.from(wavelets.slice(0, 64))
-                        .reduce((a, b) => a + b, 0) / 64;
-                    
                     for (let i = 0; i < 64; i++) {
                         if (wavelets[i] > threshold) {
                             hash |= 1n << BigInt(i);
                         }
                     }
                     
-                    resolve(hash.toString(16).padStart(16, '0'));
+                    resolve({
+                        hash: hash.toString(16).padStart(16, '0'),
+                        pixelData: pixelBuffer
+                    });
                 } catch (error) {
                     reject(error);
                 }
@@ -534,7 +463,8 @@ async function getImageHash(url) {
         }).on('error', (error) => reject(error));
     });
 }
-// Channel and message processing functions
+
+// Channel and message processing functions using Hamming distance and pixel-level check.
 async function checkChannelPermissions(channel) {
     if (!channel) {
         throw new Error('Channel object is null or undefined');
@@ -575,14 +505,10 @@ async function processMessages(channel, imageDatabase, context = '', statusMessa
         currentGroup: 1
     };
 
-    // Create base output directory
+    // Create base output directory using fsPromises.mkdir
     const baseOutputDir = BOT_INFO.outputDir;
-    await fs.mkdir(baseOutputDir, { recursive: true });
+    await fsPromises.mkdir(baseOutputDir, { recursive: true });
 
-    let lastMessageId;
-    const batchSize = 100;
-
-    // Initial log entry
     LOGGING_UTILS.logEnhanced({
         type: 'PROCESSING_START',
         data: {
@@ -594,12 +520,14 @@ async function processMessages(channel, imageDatabase, context = '', statusMessa
         }
     });
 
+    let lastMessageId;
+    const batchSize = 100;
+
     while (true) {
         if (Date.now() - processingStats.lastUpdateTime > processingStats.updateInterval) {
             const elapsedMinutes = Math.floor((Date.now() - processingStats.startTime) / 60000);
             const elapsedSeconds = (Date.now() - processingStats.startTime) / 1000;
             
-            // Log progress
             LOGGING_UTILS.logEnhanced({
                 type: 'PROCESSING_PROGRESS',
                 data: {
@@ -614,7 +542,6 @@ async function processMessages(channel, imageDatabase, context = '', statusMessa
                 }
             });
 
-            // Update Discord message
             if (statusMessage) {
                 const progressMessage = 
                     `Processing ${context}...\n` +
@@ -650,89 +577,105 @@ async function processMessages(channel, imageDatabase, context = '', statusMessa
                     processingStats.processedImages++;
                     
                     try {
-                        const hash = await getImageHash(attachment.url);
-                        
-                        if (imageDatabase.has(hash)) {
-                            processingStats.duplicatesFound++;
-                            const imageInfo = imageDatabase.get(hash);
-                            const groupFolder = path.join(
-                                baseOutputDir, 
-                                String(imageInfo.groupId).padStart(6, '0')
-                            );
-
-                            // Save original if this is the first duplicate found
-                            if (imageInfo.duplicates.length === 0) {
-                                try {
-                                    const originalExt = path.extname(imageInfo.originalMessage.attachment.name);
-                                    await downloadImage(
-                                        imageInfo.originalMessage.attachment.url,
-                                        groupFolder,
-                                        `#0riginal${originalExt}`
+                        // Get hash and pixel data for the new image.
+                        const { hash: newHash, pixelData: newPixelData } = await getImageHash(attachment.url);
+                        let duplicateFound = false;
+                        for (const entry of imageDatabase) {
+                            const distance = hammingDistance(entry.hash, newHash);
+                            if (distance <= BOT_INFO.similarityThreshold) {
+                                // Additional pixel-level check
+                                const avgPixelDiff = comparePixelData(entry.pixelData, newPixelData);
+                                if (avgPixelDiff <= BOT_INFO.pixelSimilarityThreshold) {
+                                    duplicateFound = true;
+                                    processingStats.duplicatesFound++;
+                                    const groupFolder = path.join(
+                                        baseOutputDir, 
+                                        String(entry.data.groupId).padStart(6, '0')
                                     );
-                                } catch (error) {
-                                    LOGGING_UTILS.logEnhanced({
-                                        type: 'ORIGINAL_SAVE_ERROR',
-                                        data: {
-                                            error: error.message,
-                                            url: imageInfo.originalMessage.attachment.url,
-                                            groupId: imageInfo.groupId
+
+                                    if (entry.data.duplicates.length === 0) {
+                                        try {
+                                            const originalExt = path.extname(entry.data.originalMessage.attachment.name);
+                                            await downloadImage(
+                                                entry.data.originalMessage.attachment.url,
+                                                groupFolder,
+                                                `#0riginal${originalExt}`
+                                            );
+                                        } catch (error) {
+                                            LOGGING_UTILS.logEnhanced({
+                                                type: 'ORIGINAL_SAVE_ERROR',
+                                                data: {
+                                                    error: error.message,
+                                                    url: entry.data.originalMessage.attachment.url,
+                                                    groupId: entry.data.groupId
+                                                }
+                                            });
+                                        }
+                                    }
+
+                                    try {
+                                        await downloadImage(
+                                            attachment.url,
+                                            groupFolder,
+                                            attachment.name
+                                        );
+                                    } catch (error) {
+                                        LOGGING_UTILS.logEnhanced({
+                                            type: 'DUPLICATE_SAVE_ERROR',
+                                            data: {
+                                                error: error.message,
+                                                url: attachment.url,
+                                                groupId: entry.data.groupId
+                                            }
+                                        });
+                                    }
+
+                                    entry.data.duplicates.push({
+                                        id: msg.id,
+                                        url: msg.url,
+                                        author: {
+                                            username: msg.author.username,
+                                            id: msg.author.id
+                                        },
+                                        timestamp: msg.createdTimestamp,
+                                        location: context,
+                                        similarityScore: distance.toFixed(2),
+                                        pixelDifference: avgPixelDiff.toFixed(2),
+                                        attachment: {
+                                            url: attachment.url,
+                                            name: attachment.name,
+                                            savedPath: path.join(groupFolder, attachment.name)
                                         }
                                     });
+                                    break;
                                 }
                             }
+                        }
 
-                            // Save duplicate
-                            try {
-                                await downloadImage(
-                                    attachment.url,
-                                    groupFolder,
-                                    attachment.name
-                                );
-                            } catch (error) {
-                                LOGGING_UTILS.logEnhanced({
-                                    type: 'DUPLICATE_SAVE_ERROR',
-                                    data: {
-                                        error: error.message,
-                                        url: attachment.url,
-                                        groupId: imageInfo.groupId
-                                    }
-                                });
-                            }
-
-                            imageInfo.duplicates.push({
-                                id: msg.id,
-                                url: msg.url,
-                                author: {
-                                    username: msg.author.username,
-                                    id: msg.author.id
-                                },
-                                timestamp: msg.createdTimestamp,
-                                location: context,
-                                similarityScore: '100.00',
-                                attachment: {
-                                    url: attachment.url,
-                                    name: attachment.name,
-                                    savedPath: path.join(groupFolder, attachment.name)
-                                }
-                            });
-                        } else {
-                            imageDatabase.set(hash, {
-                                groupId: processingStats.currentGroup++,
-                                originalMessage: {
-                                    id: msg.id,
-                                    url: msg.url,
-                                    author: {
-                                        username: msg.author.username,
-                                        id: msg.author.id
+                        // If no similar image was found, add as a new image entry
+                        if (!duplicateFound) {
+                            imageDatabase.push({
+                                hash: newHash,
+                                // Store the raw pixel data along with the entry
+                                pixelData: newPixelData,
+                                data: {
+                                    groupId: processingStats.currentGroup++,
+                                    originalMessage: {
+                                        id: msg.id,
+                                        url: msg.url,
+                                        author: {
+                                            username: msg.author.username,
+                                            id: msg.author.id
+                                        },
+                                        timestamp: msg.createdTimestamp,
+                                        location: context,
+                                        attachment: {
+                                            url: attachment.url,
+                                            name: attachment.name
+                                        }
                                     },
-                                    timestamp: msg.createdTimestamp,
-                                    location: context,
-                                    attachment: {
-                                        url: attachment.url,
-                                        name: attachment.name
-                                    }
-                                },
-                                duplicates: []
+                                    duplicates: []
+                                }
                             });
                         }
                     } catch (error) {
@@ -760,6 +703,7 @@ async function processMessages(channel, imageDatabase, context = '', statusMessa
         groupsCreated: processingStats.currentGroup - 1
     };
 }
+
 // Report generation
 async function generateReport(channelId, imageDatabase) {
     const timestamp = getCurrentFormattedTime();
@@ -767,30 +711,32 @@ async function generateReport(channelId, imageDatabase) {
     const writeStream = fs.createWriteStream(path.join(BOT_INFO.outputDir, fileName));
 
     writeStream.write(
-        `# Forum/Channel Analysis Report (Wavelet Hash)\n` +
+        `# Forum/Channel Analysis Report (Wavelet Hash with Pixel Verification)\n` +
         `# Channel ID: ${channelId}\n` +
         `# Analysis performed by: ${BOT_INFO.operator}\n` +
         `# Analysis start time: ${BOT_INFO.startTime} UTC\n` +
         `# Report generated at: ${timestamp} UTC\n` +
         `# Bot version: ${BOT_INFO.version}\n` +
         `# Similarity threshold: ${BOT_INFO.similarityThreshold}\n` +
+        `# Pixel similarity threshold: ${BOT_INFO.pixelSimilarityThreshold}\n` +
         `# Output directory: ${BOT_INFO.outputDir}\n\n` +
         'Group ID,Original Post URL,Original Poster,Original Location,Upload Date,' +
         'Number of Duplicates,Users Who Reposted,Locations of Reposts,Stolen Reposts,' +
-        'Self-Reposts,Average Similarity Score (%),Local Folder Path,Original Filename,' +
+        'Self-Reposts,Average Similarity Score,Average Pixel Difference,Local Folder Path,Original Filename,' +
         'Duplicate Filenames\n'
     );
 
-    for (const [hash, imageInfo] of imageDatabase.entries()) {
-        if (imageInfo.duplicates.length === 0) continue;
+    for (const entry of imageDatabase) {
+        if (entry.data.duplicates.length === 0) continue;
 
-        const originalPoster = imageInfo.originalMessage;
-        const reposts = imageInfo.duplicates;
-        const groupFolder = path.join(BOT_INFO.outputDir, String(imageInfo.groupId).padStart(6, '0'));
+        const originalPoster = entry.data.originalMessage;
+        const reposts = entry.data.duplicates;
+        const groupFolder = path.join(BOT_INFO.outputDir, String(entry.data.groupId).padStart(6, '0'));
 
         let stolenCount = 0;
         let selfRepostCount = 0;
         let totalSimilarity = 0;
+        let totalPixelDiff = 0;
 
         for (const repost of reposts) {
             if (repost.author.id === originalPoster.author.id) {
@@ -799,13 +745,15 @@ async function generateReport(channelId, imageDatabase) {
                 stolenCount++;
             }
             totalSimilarity += parseFloat(repost.similarityScore);
+            totalPixelDiff += parseFloat(repost.pixelDifference);
         }
 
         const averageSimilarity = (totalSimilarity / reposts.length).toFixed(2);
+        const averagePixelDiff = (totalPixelDiff / reposts.length).toFixed(2);
         const uploadDate = new Date(originalPoster.timestamp).toISOString().split('T')[0];
         
         const line = [
-            String(imageInfo.groupId).padStart(6, '0'),
+            String(entry.data.groupId).padStart(6, '0'),
             originalPoster.url,
             originalPoster.author.username,
             originalPoster.location,
@@ -816,6 +764,7 @@ async function generateReport(channelId, imageDatabase) {
             stolenCount,
             selfRepostCount,
             averageSimilarity,
+            averagePixelDiff,
             groupFolder,
             `#0riginal${path.extname(originalPoster.attachment.name)}`,
             reposts.map(d => d.attachment.name).join(';')
@@ -875,8 +824,8 @@ client.on(Events.MessageCreate, async message => {
 
     if (message.content === '!help') {
         const helpMessage = `
-**Forum/Channel Image Analyzer Bot Commands (Wavelet Hash Edition):**
-\`!check <channelId>\` - Analyze a forum or text channel for duplicate images using Wavelet Hash
+**Forum/Channel Image Analyzer Bot Commands (Wavelet Hash + Pixel Verification Edition):**
+\`!check <channelId>\` - Analyze a forum or text channel for duplicate images using Wavelet Hash combined with pixel-level verification
 \`!checkperms <channelId>\` - Check bot permissions in a channel
 \`!help\` - Show this help message
 
@@ -887,11 +836,10 @@ client.on(Events.MessageCreate, async message => {
 4. A CSV report will be generated with the results
 
 **Note:** 
-- Works with both forum and text channels
-- Uses Wavelet Hash for enhanced duplicate detection
-- Can detect modified/scaled images with high accuracy
-- Saves duplicate images in numbered folders
-- Creates detailed CSV reports with file locations
+- Uses Wavelet Hash to generate a compact fingerprint.
+- Applies a hamming distance check with a strict similarity threshold.
+- Further validates potential duplicates by comparing the 32x32 greyscale pixel data.
+- Adjust BOT_INFO.similarityThreshold and BOT_INFO.pixelSimilarityThreshold to reduce false positives.
 `;
         message.reply(helpMessage);
     }
@@ -947,7 +895,7 @@ client.login(process.env.DISCORD_BOT_TOKEN)
                 startTime: BOT_INFO.startTime,
                 operator: BOT_INFO.operator,
                 version: BOT_INFO.version,
-                hashType: 'Wavelet Hash',
+                hashType: 'Wavelet Hash + Pixel Verification',
                 outputDir: BOT_INFO.outputDir
             }
         });
@@ -962,20 +910,4 @@ client.login(process.env.DISCORD_BOT_TOKEN)
             }
         });
         process.exit(1);
-    });
-
-// Export for testing
-module.exports = {
-    formatElapsedTime,
-    getCurrentFormattedTime,
-    getImageHash,
-    hammingDistance,
-    discreteWaveletTransform,
-    processMessages,
-    generateReport,
-    checkMemoryUsage,
-    downloadImage,
-    BOT_INFO,
-    LOG_CONFIG,
-    LOGGING_UTILS
-};
+});

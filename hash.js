@@ -16,8 +16,19 @@ const BOT_INFO = {
 const LOG_CONFIG = {
     logDir: 'logs',
     logFile: `bot_log_${new Date().toISOString().split('T')[0]}.log`
+	
 };
-
+const LOG_EVENTS = {
+    HASH_COMMAND: 'HASH_COMMAND_RECEIVED',
+    HASH_START: 'HASH_CREATION_START',
+    HASH_PROGRESS: 'HASH_CREATION_PROGRESS',
+    HASH_FINISH: 'HASH_CREATION_FINISH',
+    HASH_EXPORT: 'HASH_EXPORT',
+    NEW_IMAGE: 'NEW_IMAGE_DETECTED',
+    NEW_HASH: 'NEW_HASH_CREATED',
+    HASH_COMPARED: 'HASH_COMPARED',
+    DUPLICATE_FOUND: 'DUPLICATE_FOUND'
+};
 // Create logs directory if it doesn't exist
 if (!fs.existsSync(LOG_CONFIG.logDir)) {
     fs.mkdirSync(LOG_CONFIG.logDir);
@@ -635,7 +646,7 @@ client.on(Events.MessageCreate, async message => {
     if (message.content.startsWith('!checkperms')) {
         const channelId = message.content.split(' ')[1];
         if (!channelId) {
-            return message.reply('Please provide a channel ID. Usage: !checkperms <channelId>');
+            return message.reply('Please provide a channel ID. Usage: !checkperms channelId');
         }
 
         try {
@@ -677,7 +688,7 @@ client.on(Events.MessageCreate, async message => {
     if (message.content.startsWith('!check')) {
         const channelId = message.content.split(' ')[1];
         if (!channelId) {
-            return message.reply('Please provide a forum channel ID. Usage: !check <channelId>');
+            return message.reply('Please provide a forum channel ID. Usage: !check channelId');
         }
         
         await handleCheckCommand(message, channelId);
@@ -687,14 +698,14 @@ client.on(Events.MessageCreate, async message => {
     if (message.content === '!help') {
         const helpMessage = `
 **Forum Image Analyzer Bot Commands:**
-\`!check <channelId>\` - Analyze a forum channel for duplicate images
-\`!checkperms <channelId>\` - Check bot permissions in a forum channel
-\`!hash <channelId>\` - Build hash database for previous messages in a channel
+\`!check channelId\` - Analyze a forum channel for duplicate images
+\`!checkperms channelId\` - Check bot permissions in a forum channel
+\`!hash channelId\` - Build hash database for previous messages in a channel
 \`!help\` - Show this help message
 
 **How to use:**
 1. Configure the tracked channels in your .env file (TRACKED_CHANNELS comma-separated).
-2. To build a hash database, use \`!hash <channelId>\`.
+2. To build a hash database, use \`!hash channelId\`.
 3. New image messages will be processed to check for duplicate hash values.
 4. If a duplicate image is detected, and the original message is present, you'll receive an embedded reply indicating either "self repost" or "dupe" with a link.
 `;

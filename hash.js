@@ -16,7 +16,6 @@ const BOT_INFO = {
 const LOG_CONFIG = {
     logDir: 'logs',
     logFile: `bot_log_${new Date().toISOString().split('T')[0]}.log`
-	
 };
 const LOG_EVENTS = {
     HASH_COMMAND: 'HASH_COMMAND_RECEIVED',
@@ -28,12 +27,17 @@ const LOG_EVENTS = {
     NEW_HASH: 'NEW_HASH_CREATED',
     HASH_COMPARED: 'HASH_COMPARED',
     DUPLICATE_FOUND: 'DUPLICATE_FOUND'
-	};
-	
+};
+
 // Create logs directory if it doesn't exist
 if (!fs.existsSync(LOG_CONFIG.logDir)) {
     fs.mkdirSync(LOG_CONFIG.logDir);
 }
+
+// Retrieve tracked channels from environment variables (comma-separated list)
+const TRACKED_CHANNELS = process.env.TRACKED_CHANNELS 
+    ? process.env.TRACKED_CHANNELS.split(',').map(channelId => channelId.trim())
+    : [];
 
 // Initialize the client with proper intents
 const client = new Client({
@@ -45,13 +49,12 @@ const client = new Client({
     ]
 });
 
-// In-memory image database for legacy functionality (forum analysis, etc)
-const imageDatabase = new Map();
+// ----------------------
+// File-based persistent hash database helpers
+// ----------------------
 
-// --- New: File-based persistent hash database helpers --- //
 /**
- * Loads the hash table from file for a given channel.
- * The file name is based on the channel id.
+ * Loads the hash database (a Map) from a file for a given channel.
  */
 function loadHashDatabase(channelId) {
     const filePath = `hashtable_${channelId}.json`;
@@ -75,19 +78,18 @@ function loadHashDatabase(channelId) {
  */
 function saveHashDatabase(channelId, hashDB) {
     const filePath = `hashtable_${channelId}.json`;
-    // To convert Map to a plain object, use Object.fromEntries.
+    // Convert Map to a plain object
     const obj = Object.fromEntries(hashDB);
     fs.writeFileSync(filePath, JSON.stringify(obj, null, 2));
 }
 
-// --- End File-based hash database helpers --- //
-
-// Helper Functions (Preserved from original file)
+// ----------------------
+// Helper Functions
+// ----------------------
 function formatElapsedTime(seconds) {
     const hours = Math.floor(seconds / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
     const remainingSeconds = Math.floor(seconds % 60);
-
     if (hours > 0) {
         return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
     } else {
@@ -102,7 +104,6 @@ function getCurrentFormattedTime() {
 function logMessage(type, content, elapsedTime = null) {
     const timestamp = new Date().toISOString();
     const logMsg = `[${timestamp}] ${type}: ${JSON.stringify(content)}${elapsedTime ? ` | Elapsed Time: ${elapsedTime}` : ''}\n`;
-    
     console.log(logMsg.trim());
     fs.appendFileSync(path.join(LOG_CONFIG.logDir, LOG_CONFIG.logFile), logMsg);
 }
@@ -110,18 +111,16 @@ function logMessage(type, content, elapsedTime = null) {
 function checkMemoryUsage() {
     const used = process.memoryUsage();
     const memoryUsageMB = Math.round(used.heapUsed / 1024 / 1024);
-    
     if (memoryUsageMB > (BOT_INFO.memoryLimit * 0.8)) {
         logMessage('MEMORY_WARNING', {
             currentUsageMB: memoryUsageMB,
             limitMB: BOT_INFO.memoryLimit
         });
     }
-
     return memoryUsageMB;
 }
 
-// Function to download image and calculate its hash (Preserved)
+// Downloads an image and calculates its MD5 hash
 async function getImageHash(url) {
     return new Promise((resolve, reject) => {
         https.get(url, (response) => {
@@ -137,75 +136,61 @@ async function getImageHash(url) {
     });
 }
 
-// Function to check channel permissions (Preserved)
+// Checks for required channel permissions.
 async function checkChannelPermissions(channel) {
     if (!channel) {
         throw new Error('Channel object is null or undefined');
     }
-
-    // Check for forum channel type (15) or threads
     if (!channel.isTextBased() && !channel.isThread() && channel.type !== 15) {
         throw new Error('This channel is not a text channel, thread, or forum');
     }
-
     const permissions = channel.permissionsFor(client.user);
     if (!permissions) {
         throw new Error('Cannot check permissions for this channel');
     }
-
-    const requiredPermissions = [
-        'ViewChannel',
-        'ReadMessageHistory',
-        'SendMessages'
-    ];
-
+    const requiredPermissions = ['ViewChannel', 'ReadMessageHistory', 'SendMessages'];
     const missingPermissions = requiredPermissions.filter(perm => !permissions.has(perm));
     if (missingPermissions.length > 0) {
         throw new Error(`Missing required permissions: ${missingPermissions.join(', ')}`);
     }
-
     return true;
 }
 
-// Function to count messages in a thread or channel (Preserved)
+/**
+ * Counts total messages in a channel (or thread).
+ */
 async function countTotalMessages(channel) {
     await checkChannelPermissions(channel);
-
     let totalMessages = 0;
     let lastMessageId;
     const batchSize = 100;
-
     try {
         while (true) {
             const options = { limit: batchSize };
             if (lastMessageId) options.before = lastMessageId;
-
             const messages = await channel.messages.fetch(options);
             if (!messages || messages.size === 0) break;
-
             totalMessages += messages.size;
             lastMessageId = messages.last()?.id;
-
             messages.clear();
             if (global.gc) global.gc();
         }
-
         return totalMessages;
     } catch (error) {
         throw new Error(`Failed to count messages: ${error.message}`);
     }
 }
 
-// Function to get all forum posts (Preserved)
+/**
+ * Retrieves all forum posts (active & archived) from a channel.
+ */
 async function getAllForumPosts(channel) {
     if (channel.type !== 15) {
         throw new Error('This is not a forum channel');
     }
-
     try {
         const activePosts = await channel.threads.fetchActive();
         const archivedPosts = await channel.threads.fetchArchived();
-
         return {
             active: Array.from(activePosts.threads.values()),
             archived: Array.from(archivedPosts.threads.values())
@@ -215,40 +200,33 @@ async function getAllForumPosts(channel) {
     }
 }
 
-// Function to process messages and find images (Preserved for forum analysis)
+/**
+ * Processes messages in a channel to update the image database.
+ * Used for forum analysis (legacy functionality).
+ */
 async function processMessages(channel, imageDatabase, context = '') {
     await checkChannelPermissions(channel);
-
     let processedImages = 0;
     let duplicatesFound = 0;
     let lastMessageId;
     const batchSize = 100;
-
     while (true) {
         const currentMemory = checkMemoryUsage();
-        
-        if (currentMemory > (BOT_INFO.memoryLimit * 0.8)) {
-            if (global.gc) {
-                global.gc();
-                await new Promise(resolve => setTimeout(resolve, 1000));
-            }
+        if (currentMemory > (BOT_INFO.memoryLimit * 0.8) && global.gc) {
+            global.gc();
+            await new Promise(resolve => setTimeout(resolve, 1000));
         }
-
         const options = { limit: batchSize };
         if (lastMessageId) options.before = lastMessageId;
-        
         const messages = await channel.messages.fetch(options);
         if (messages.size === 0) break;
-
         for (const msg of messages.values()) {
             const attachments = [...msg.attachments.values()];
-            
             for (const attachment of attachments) {
                 if (attachment.contentType?.startsWith('image/')) {
                     processedImages++;
                     try {
                         const hash = await getImageHash(attachment.url);
-                        
                         if (!imageDatabase.has(hash)) {
                             imageDatabase.set(hash, {
                                 originalMessage: {
@@ -286,20 +264,18 @@ async function processMessages(channel, imageDatabase, context = '') {
                 }
             }
         }
-
         lastMessageId = messages.last().id;
         messages.clear();
     }
-
     return { processedImages, duplicatesFound };
 }
 
-// Function to generate CSV report (Preserved)
+/**
+ * Generates a CSV report of duplicate images.
+ */
 async function generateReport(channelId, imageDatabase) {
     const fileName = `duplicate_report_${channelId}_${Date.now()}.csv`;
     const writeStream = fs.createWriteStream(fileName);
-
-    // Write header
     writeStream.write(
         `# Forum Analysis Report\n` +
         `# Channel ID: ${channelId}\n` +
@@ -308,17 +284,13 @@ async function generateReport(channelId, imageDatabase) {
         `# Report generated at: ${getCurrentFormattedTime()} UTC\n\n` +
         'Original Post URL,Original Poster,Original Location,Upload Date,Number of Duplicates,Users Who Reposted,Locations of Reposts,Stolen Reposts,Self-Reposts\n'
     );
-
     for (const [hash, imageInfo] of imageDatabase.entries()) {
         const allPosters = [imageInfo.originalMessage, ...imageInfo.duplicates];
         allPosters.sort((a, b) => a.timestamp - b.timestamp);
-
         const originalPoster = allPosters[0];
         const reposts = allPosters.slice(1);
-
         let stolenCount = 0;
         let selfRepostCount = 0;
-
         for (const repost of reposts) {
             if (repost.author.id === originalPoster.author.id) {
                 selfRepostCount++;
@@ -326,9 +298,7 @@ async function generateReport(channelId, imageDatabase) {
                 stolenCount++;
             }
         }
-
         const uploadDate = new Date(originalPoster.timestamp).toISOString().split('T')[0];
-        
         const line = [
             originalPoster.url,
             originalPoster.author.username,
@@ -340,321 +310,14 @@ async function generateReport(channelId, imageDatabase) {
             stolenCount,
             selfRepostCount
         ].join(',') + '\n';
-
         writeStream.write(line);
     }
-
     await new Promise(resolve => writeStream.end(resolve));
     return fileName;
 }
 
-// Main command handler for forum analysis (Preserved)
-async function handleCheckCommand(message, channelId) {
-    const commandStartTime = Date.now();
-    let statusMessage = null;
-    
-    try {
-        const initialMemory = checkMemoryUsage();
-        
-        if (!channelId.match(/^\d+$/)) {
-            throw new Error('Invalid channel ID format');
-        }
-
-        let channel;
-        try {
-            channel = await client.channels.fetch(channelId);
-            if (!channel) {
-                throw new Error('Channel not found');
-            }
-            
-            if (channel.type !== 15) {
-                throw new Error('This channel is not a forum');
-            }
-            
-        } catch (error) {
-            throw new Error(`Failed to access channel: ${error.message}`);
-        }
-
-        statusMessage = await message.reply('Starting forum analysis... This might take a while.');
-        
-        // Get all forum posts
-        const { active: activePosts, archived: archivedPosts } = await getAllForumPosts(channel);
-        const allPosts = [...activePosts, ...archivedPosts];
-        
-        let totalMessages = 0;
-        for (const post of allPosts) {
-            totalMessages += await countTotalMessages(post);
-        }
-
-        await statusMessage.edit(
-            `Starting analysis of ${totalMessages.toLocaleString()} total messages ` +
-            `across ${allPosts.length} forum posts (${activePosts.length} active, ${archivedPosts.length} archived)...`
-        );
-
-        // Clear previous data and run garbage collection
-        imageDatabase.clear();
-        if (global.gc) {
-            global.gc();
-        }
-
-        let processedImages = 0;
-        let duplicatesFound = 0;
-        let startTime = Date.now();
-
-        // Process each forum post
-        for (const post of allPosts) {
-            const postResults = await processMessages(post, imageDatabase, `forum-post-${post.name}`);
-            processedImages += postResults.processedImages;
-            duplicatesFound += postResults.duplicatesFound;
-
-            const elapsedMinutes = Math.floor((Date.now() - startTime) / 60000);
-            await statusMessage.edit(
-                `Processing... Found ${processedImages} images (${duplicatesFound} duplicates)\n` +
-                `Time elapsed: ${elapsedMinutes} minutes\n` +
-                `Currently processing: ${post.name}`
-            );
-        }
-
-        // Generate report
-        const reportFile = await generateReport(channelId, imageDatabase);
-        const elapsedTime = formatElapsedTime((Date.now() - commandStartTime) / 1000);
-
-        const finalStats = {
-            totalMessages,
-            processedImages,
-            duplicatesFound,
-            postsAnalyzed: allPosts.length,
-            elapsedTime,
-            memoryUsed: `${checkMemoryUsage()}MB`
-        };
-
-        logMessage('ANALYSIS_COMPLETE', finalStats);
-
-        await statusMessage.edit({
-            content: `Analysis complete!\n` +
-                    `Total messages analyzed: ${totalMessages.toLocaleString()}\n` +
-                    `Images found: ${processedImages.toLocaleString()}\n` +
-                    `Duplicates found: ${duplicatesFound.toLocaleString()}\n` +
-                    `Forum posts analyzed: ${allPosts.length}\n` +
-                    `Time taken: ${elapsedTime}\n` +
-                    `Report saved as: ${reportFile}`,
-            files: [reportFile]
-        });
-
-    } catch (error) {
-        logMessage('ERROR', {
-            error: error.message,
-            stack: error.stack,
-            channelId: channelId
-        });
-
-        const errorMessage = `An error occurred: ${error.message}`;
-        if (statusMessage) {
-            await statusMessage.edit(errorMessage);
-        } else {
-            await message.reply(errorMessage);
-        }
-    }
-}
-
-// --- New: Real-time image tracking and duplicate reporting --- //
-
-// Get the list of channel IDs to track from environment variables (comma separated)
-const TRACKED_CHANNELS = process.env.TRACKED_CHANNELS ? process.env.TRACKED_CHANNELS.split(',') : [];
-
-client.on(Events.MessageCreate, async message => {
-    if (message.author.bot) return;
-    
-    // Add debug logging
-    console.log(`Received message: ${message.content}`);
-    
-    if (message.content.startsWith('!hash')) {
-        console.log('Hash command detected');
-        const channelId = message.content.split(' ')[1];
-        console.log(`Channel ID: ${channelId}`);
-    }
-});	
-client.on(Events.MessageCreate, async message => {
-    // Ignore bot messages and commands (starting with '!')
-    if (message.author.bot) return;
-    if (message.content.startsWith('!')) return;
-    
-    // Only process messages in tracked channels if TRACKED_CHANNELS is specified
-    if (TRACKED_CHANNELS.length > 0 && !TRACKED_CHANNELS.includes(message.channel.id)) {
-        return;
-    }
-    
-    // Check if the message contains an image attachment.
-    const attachments = [...message.attachments.values()];
-    let containsImage = false;
-    for (const attachment of attachments) {
-        if (attachment.contentType && attachment.contentType.startsWith('image/')) {
-            containsImage = true;
-            break;
-        }
-    }
-    if (!containsImage) return;
-    
-    // Load the current hash table for this channel from file.
-    let hashDB = loadHashDatabase(message.channel.id);
-    
-    // Process each image attachment.
-    for (const attachment of attachments) {
-        if (attachment.contentType && attachment.contentType.startsWith('image/')) {
-            try {
-                const hash = await getImageHash(attachment.url);
-                if (!hashDB.has(hash)) {
-                    // No prior hash: store as original.
-                    hashDB.set(hash, {
-                        originalMessage: {
-                            id: message.id,
-                            url: message.url,
-                            author: {
-                                username: message.author.username,
-                                id: message.author.id
-                            },
-                            timestamp: message.createdTimestamp,
-                            channelId: message.channel.id
-                        },
-                        duplicates: []
-                    });
-                } else {
-                    // Duplicate: retrieve original entry.
-                    const entry = hashDB.get(hash);
-                    // Verify if the original message is still present.
-                    let originalMsg;
-                    try {
-                        originalMsg = await message.channel.messages.fetch(entry.originalMessage.id);
-                    } catch (err) {
-                        originalMsg = null;
-                    }
-                    
-                    if (originalMsg) {
-                        // Compare authors.
-                        if (entry.originalMessage.author.id === message.author.id) {
-                            // Self repost scenario.
-                            const embed = new EmbedBuilder()
-                                .setDescription("self repost")
-                                .setColor(0xFFA500);
-                            await message.reply({ embeds: [embed] });
-                        } else {
-                            // Different user duplicate.
-                            const embed = new EmbedBuilder()
-                                .setDescription(`dupe: [Original Post](${entry.originalMessage.url})`)
-                                .setColor(0xFF0000);
-                            await message.reply({ embeds: [embed] });
-                        }
-                    }
-                    // Add this duplicate message to the entry.
-                    entry.duplicates.push({
-                        id: message.id,
-                        url: message.url,
-                        author: {
-                            username: message.author.username,
-                            id: message.author.id
-                        },
-                        timestamp: message.createdTimestamp,
-                        channelId: message.channel.id
-                    });
-                }
-            } catch (err) {
-                logMessage('IMAGE_PROCESSING_ERROR', {
-                    messageId: message.id,
-                    attachmentUrl: attachment.url,
-                    error: err.message
-                });
-            }
-        }
-    }
-    // Save the updated hash table to file.
-    saveHashDatabase(message.channel.id, hashDB);
-});
-
-// Command handler for building hash database from previous messages.
-client.on(Events.MessageCreate, async message => {
-    if (message.author.bot) return;
-    if (message.content.startsWith('!hash')) {
-        const args = message.content.split(' ');
-        const channelId = args[1];
-        if (!channelId) {
-            return message.reply('Please provide a channel ID. Usage: !hash <channel_id>');
-        }
-        try {
-            const channel = await client.channels.fetch(channelId);
-            if (!channel) return message.reply('Channel not found');
-            await checkChannelPermissions(channel);
-            // Build hash database from previous messages.
-            const hashDB = await buildHashDatabaseForChannel(channel);
-            saveHashDatabase(channelId, hashDB);
-            message.reply(`Hash database built for channel ${channelId}. Processed ${hashDB.size} unique images.`);
-        } catch (err) {
-            message.reply(`Error building hash database: ${err.message}`);
-        }
-    }
-});
-
-client.on(Events.MessageCreate, async message => {
-    if (message.author.bot) return;
-    
-    console.log(`Received message: ${message.content}`);
-    
-    if (message.content.startsWith('!hash')) {
-        console.log('Hash command detected');
-        const channelId = message.content.split(' ')[1];
-        console.log(`Channel ID: ${channelId}`);
-        
-        try {
-            // Log the hash command received
-            logMessage(LOG_EVENTS.HASH_COMMAND, { channelId });
-            
-            // Fetch the channel
-            const channel = await client.channels.fetch(channelId);
-            if (!channel) {
-                return message.reply('Channel not found');
-            }
-
-            // Check permissions
-            await checkChannelPermissions(channel);
-            
-            // Log hash creation start
-            logMessage(LOG_EVENTS.HASH_START, { channelId });
-            
-            // Send initial response
-            const statusMessage = await message.reply('Starting to build hash database...');
-            
-            // Build hash database
-            const hashDB = await buildHashDatabaseForChannel(channel);
-            
-            // Save the database
-            saveHashDatabase(channelId, hashDB);
-            
-            // Log completion
-            logMessage(LOG_EVENTS.HASH_FINISH, { 
-                channelId,
-                totalImages: hashDB.size 
-            });
-            
-            // Update status message
-            await statusMessage.edit(`Hash database built for channel ${channelId}. Processed ${hashDB.size} unique images.`);
-            
-            // Log export
-            logMessage(LOG_EVENTS.HASH_EXPORT, {
-                channelId,
-                filename: `hashtable_${channelId}.json`
-            });
-            
-        } catch (error) {
-            logMessage('ERROR', {
-                error: error.message,
-                channelId
-            });
-            message.reply(`Error building hash database: ${error.message}`);
-        }
-    }
-});
-
 /**
- * Builds a hash database by scanning older messages in a channel.
+ * Builds the hash database by scanning prior messages in a channel.
  */
 async function buildHashDatabaseForChannel(channel) {
     let hashDB = new Map();
@@ -712,41 +375,252 @@ async function buildHashDatabaseForChannel(channel) {
     return hashDB;
 }
 
-// Existing command handler for checking channel permissions.
-client.on(Events.MessageCreate, async message => {
-    if (message.author.bot) return;
+/**
+ * Handles the forum analysis command (!check) for older messages.
+ */
+async function handleCheckCommand(message, channelId) {
+    const commandStartTime = Date.now();
+    let statusMessage = null;
+    try {
+        if (!channelId.match(/^\d+$/)) {
+            throw new Error('Invalid channel ID format');
+        }
+        let channel;
+        try {
+            channel = await client.channels.fetch(channelId);
+            if (!channel) throw new Error('Channel not found');
+            if (channel.type !== 15) throw new Error('This channel is not a forum channel');
+        } catch (error) {
+            throw new Error(`Failed to access channel: ${error.message}`);
+        }
+        statusMessage = await message.reply('Starting forum analysis... This might take a while.');
+        // Get all forum posts
+        const { active: activePosts, archived: archivedPosts } = await getAllForumPosts(channel);
+        const allPosts = [...activePosts, ...archivedPosts];
+        let totalMessages = 0;
+        for (const post of allPosts) {
+            totalMessages += await countTotalMessages(post);
+        }
+        await statusMessage.edit(
+            `Starting analysis of ${totalMessages.toLocaleString()} total messages across ${allPosts.length} forum posts...`
+        );
+        // Clear previous data and run garbage collection
+        const imageDatabase = new Map();
+        if (global.gc) global.gc();
+        let processedImages = 0;
+        let duplicatesFound = 0;
+        let startTime = Date.now();
+        // Process each forum post
+        for (const post of allPosts) {
+            const postResults = await processMessages(post, imageDatabase, `forum-post-${post.name}`);
+            processedImages += postResults.processedImages;
+            duplicatesFound += postResults.duplicatesFound;
+            const elapsedMinutes = Math.floor((Date.now() - startTime) / 60000);
+            await statusMessage.edit(
+                `Processing... Found ${processedImages} images (${duplicatesFound} duplicates)\n` +
+                `Time elapsed: ${elapsedMinutes} minutes\n` +
+                `Currently processing: ${post.name}`
+            );
+        }
+        // Generate report
+        const reportFile = await generateReport(channelId, imageDatabase);
+        const elapsedTime = formatElapsedTime((Date.now() - commandStartTime) / 1000);
+        const finalStats = {
+            totalMessages,
+            processedImages,
+            duplicatesFound,
+            postsAnalyzed: allPosts.length,
+            elapsedTime,
+            memoryUsed: `${checkMemoryUsage()}MB`
+        };
+        logMessage('ANALYSIS_COMPLETE', finalStats);
+        await statusMessage.edit({
+            content: `Analysis complete!
+Total messages analyzed: ${totalMessages.toLocaleString()}
+Images found: ${processedImages.toLocaleString()}
+Duplicates found: ${duplicatesFound.toLocaleString()}
+Forum posts analyzed: ${allPosts.length}
+Time taken: ${elapsedTime}
+Report saved as: ${reportFile}`,
+            files: [reportFile]
+        });
+    } catch (error) {
+        logMessage('ERROR', {
+            error: error.message,
+            stack: error.stack,
+            channelId
+        });
+        const errorMessage = `An error occurred: ${error.message}`;
+        if (statusMessage) {
+            await statusMessage.edit(errorMessage);
+        } else {
+            await message.reply(errorMessage);
+        }
+    }
+}
 
+// ----------------------
+// Real-Time Image Tracking and Duplicate Reporting
+// ----------------------
+
+// In-memory hash tables for tracked channels (populated on startup)
+const channelHashTables = {};
+
+// On startup, load the most recent hashtable file for each tracked channel.
+client.once('ready', () => {
+    console.log(`Bot is ready! Logged in as ${client.user.tag}`);
+    if (TRACKED_CHANNELS.length === 0) {
+        console.log('No tracked channels configured in TRACKED_CHANNELS environment variable.');
+    } else {
+        TRACKED_CHANNELS.forEach(channelId => {
+            channelHashTables[channelId] = loadHashDatabase(channelId);
+            console.log(`Loaded hashtable for tracked channel ${channelId}: ${channelHashTables[channelId].size} entries`);
+        });
+    }
+});
+
+// Real-time tracking: Listen for messages containing image attachments in tracked channels.
+client.on(Events.MessageCreate, async (message) => {
+    // Ignore messages from bots or commands
+    if (message.author.bot || message.content.startsWith('!')) return;
+    // Only process if the channel is in the tracked channels list.
+    if (TRACKED_CHANNELS.length > 0 && !TRACKED_CHANNELS.includes(message.channel.id)) {
+        return;
+    }
+    const attachments = [...message.attachments.values()];
+    // Check if message contains at least one image attachment.
+    const containsImage = attachments.some(att => att.contentType && att.contentType.startsWith('image/'));
+    if (!containsImage) return;
+    // Load current hashtable for this channel.
+    let hashDB = loadHashDatabase(message.channel.id);
+    for (const attachment of attachments) {
+        if (attachment.contentType && attachment.contentType.startsWith('image/')) {
+            try {
+                const hash = await getImageHash(attachment.url);
+                if (!hashDB.has(hash)) {
+                    // No existing record: add new unique image.
+                    hashDB.set(hash, {
+                        originalMessage: {
+                            id: message.id,
+                            url: message.url,
+                            author: {
+                                username: message.author.username,
+                                id: message.author.id
+                            },
+                            timestamp: message.createdTimestamp,
+                            channelId: message.channel.id
+                        },
+                        duplicates: []
+                    });
+                } else {
+                    // Duplicate found; retrieve record.
+                    const entry = hashDB.get(hash);
+                    // Check if the original message is still available.
+                    let originalMsg;
+                    try {
+                        originalMsg = await message.channel.messages.fetch(entry.originalMessage.id);
+                    } catch (err) {
+                        originalMsg = null;
+                    }
+                    if (originalMsg) {
+                        // Determine type of duplicate.
+                        const isSelfRepost = entry.originalMessage.author.id === message.author.id;
+                        const embed = new EmbedBuilder()
+                            .setTitle(isSelfRepost ? 'SELF-REPOST' : 'DUPE')
+                            .setDescription(`[Original message](${entry.originalMessage.url})`)
+                            .setColor(isSelfRepost ? 0xFFA500 : 0xFF0000)
+                            .setTimestamp();
+                        await message.reply({ embeds: [embed] });
+                    }
+                    // Add duplicate entry.
+                    entry.duplicates.push({
+                        id: message.id,
+                        url: message.url,
+                        author: {
+                            username: message.author.username,
+                            id: message.author.id
+                        },
+                        timestamp: message.createdTimestamp,
+                        channelId: message.channel.id
+                    });
+                }
+            } catch (err) {
+                logMessage('IMAGE_PROCESSING_ERROR', {
+                    messageId: message.id,
+                    attachmentUrl: attachment.url,
+                    error: err.message
+                });
+            }
+        }
+    }
+    // Save updated hashtable to file.
+    saveHashDatabase(message.channel.id, hashDB);
+    // Also update in-memory table for faster access.
+    channelHashTables[message.channel.id] = hashDB;
+});
+
+// ----------------------
+// Command Handlers
+// ----------------------
+
+// Build hash database from previous messages.
+client.on(Events.MessageCreate, async (message) => {
+    if (message.author.bot) return;
+    if (message.content.startsWith('!hash')) {
+        logMessage(LOG_EVENTS.HASH_COMMAND, { content: message.content });
+        const args = message.content.split(' ');
+        const channelId = args[1];
+        if (!channelId) {
+            return message.reply('Please provide a channel ID. Usage: !hash <channel_id>');
+        }
+        try {
+            const channel = await client.channels.fetch(channelId);
+            if (!channel) return message.reply('Channel not found');
+            await checkChannelPermissions(channel);
+            logMessage(LOG_EVENTS.HASH_START, { channelId });
+            const statusMessage = await message.reply('Starting to build hash database...');
+            const hashDB = await buildHashDatabaseForChannel(channel);
+            saveHashDatabase(channelId, hashDB);
+            logMessage(LOG_EVENTS.HASH_FINISH, { channelId, totalImages: hashDB.size });
+            await statusMessage.edit(`Hash database built for channel ${channelId}. Processed ${hashDB.size} unique images.`);
+            logMessage(LOG_EVENTS.HASH_EXPORT, { channelId, filename: `hashtable_${channelId}.json` });
+        } catch (error) {
+            logMessage('ERROR', { error: error.message, channelId });
+            message.reply(`Error building hash database: ${error.message}`);
+        }
+    }
+});
+
+// Command to check forum analysis (!check command).
+client.on(Events.MessageCreate, async (message) => {
+    if (message.author.bot) return;
+    if (message.content.startsWith('!check')) {
+        const channelId = message.content.split(' ')[1];
+        if (!channelId) {
+            return message.reply('Please provide a forum channel ID. Usage: !check <channelId>');
+        }
+        await handleCheckCommand(message, channelId);
+    }
+});
+
+// Command to check channel permissions.
+client.on(Events.MessageCreate, async (message) => {
+    if (message.author.bot) return;
     if (message.content.startsWith('!checkperms')) {
         const channelId = message.content.split(' ')[1];
         if (!channelId) {
-            return message.reply('Please provide a channel ID. Usage: !checkperms channelId');
+            return message.reply('Please provide a channel ID. Usage: !checkperms <channelId>');
         }
-
         try {
             const channel = await client.channels.fetch(channelId);
-            if (!channel) {
-                return message.reply('Channel not found');
-            }
-
+            if (!channel) return message.reply('Channel not found');
             if (channel.type !== 15) {
                 return message.reply('This is not a forum channel. This bot only works with forum channels.');
             }
-
             const permissions = channel.permissionsFor(client.user);
-            if (!permissions) {
-                return message.reply('Cannot check permissions for this channel');
-            }
-
-            const permissionList = [
-                'ViewChannel',
-                'ReadMessageHistory',
-                'SendMessages'
-            ];
-
-            const permissionStatus = permissionList.map(perm => 
-                `${perm}: ${permissions.has(perm) ? '✅' : '❌'}`
-            ).join('\n');
-
+            if (!permissions) return message.reply('Cannot check permissions for this channel');
+            const permissionList = ['ViewChannel', 'ReadMessageHistory', 'SendMessages'];
+            const permissionStatus = permissionList.map(perm => `${perm}: ${permissions.has(perm) ? '✅' : '❌'}`).join('\n');
             message.reply(`Bot permissions in forum channel:\n${permissionStatus}`);
         } catch (error) {
             message.reply(`Error checking permissions: ${error.message}`);
@@ -754,69 +628,51 @@ client.on(Events.MessageCreate, async message => {
     }
 });
 
-// Main command handler for forum analysis command.
-client.on(Events.MessageCreate, async message => {
+// Help command.
+client.on(Events.MessageCreate, async (message) => {
     if (message.author.bot) return;
-
-    if (message.content.startsWith('!check')) {
-        const channelId = message.content.split(' ')[1];
-        if (!channelId) {
-            return message.reply('Please provide a forum channel ID. Usage: !check channelId');
-        }
-        
-        await handleCheckCommand(message, channelId);
-    }
-
-    // Help command
     if (message.content === '!help') {
         const helpMessage = `
 **Forum Image Analyzer Bot Commands:**
-\`!check channelId\` - Analyze a forum channel for duplicate images
-\`!checkperms channelId\` - Check bot permissions in a forum channel
-\`!hash channelId\` - Build hash database for previous messages in a channel
+\`!check <channelId>\` - Analyze a forum channel for duplicate images
+\`!checkperms <channelId>\` - Check bot permissions in a forum channel
+\`!hash <channelId>\` - Build hash database for previous messages in a channel
 \`!help\` - Show this help message
 
-**How to use:**
-1. Configure the tracked channels in your .env file (TRACKED_CHANNELS comma-separated).
-2. To build a hash database, use \`!hash channelId\`.
-3. New image messages will be processed to check for duplicate hash values.
-4. If a duplicate image is detected, and the original message is present, you'll receive an embedded reply indicating either "self repost" or "dupe" with a link.
+**Real-Time Tracking:**
+Once the bot is launched, it loads hashtable files for tracked channels specified in the TRACKED_CHANNELS environment variable.
+Any new message in a tracked channel with an image attachment is processed:
+- If the image hash already exists, the bot replies with an embedded message indicating either SELF-REPOST or DUPE (with a link to the original message).
+- Otherwise, the image gets added to the hash database.
 `;
         message.reply(helpMessage);
     }
 });
 
-// Error handling
+// ----------------------
+// Error Handling
+// ----------------------
 client.on(Events.Error, error => {
-    logMessage('DISCORD_ERROR', {
-        error: error.message,
-        stack: error.stack
-    });
+    logMessage('DISCORD_ERROR', { error: error.message, stack: error.stack });
 });
 
-// Process error handling
 process.on('unhandledRejection', error => {
-    logMessage('UNHANDLED_REJECTION', {
-        error: error.message,
-        stack: error.stack
-    });
+    logMessage('UNHANDLED_REJECTION', { error: error.message, stack: error.stack });
 });
 
 process.on('uncaughtException', error => {
-    logMessage('UNCAUGHT_EXCEPTION', {
-        error: error.message,
-        stack: error.stack
-    });
+    logMessage('UNCAUGHT_EXCEPTION', { error: error.message, stack: error.stack });
     process.exit(1);
 });
 
-// Startup checks
+// ----------------------
+// Bot Startup
+// ----------------------
 if (!process.env.DISCORD_BOT_TOKEN) {
     logMessage('STARTUP_ERROR', 'No Discord bot token found in environment variables!');
     process.exit(1);
 }
 
-// Bot initialization
 client.login(process.env.DISCORD_BOT_TOKEN)
     .then(() => {
         logMessage('BOT_LOGIN_SUCCESS', {
@@ -827,14 +683,11 @@ client.login(process.env.DISCORD_BOT_TOKEN)
         console.log(`Bot is ready! Logged in as ${client.user.tag}`);
     })
     .catch(error => {
-        logMessage('BOT_LOGIN_ERROR', {
-            error: error.message,
-            stack: error.stack
-        });
+        logMessage('BOT_LOGIN_ERROR', { error: error.message, stack: error.stack });
         process.exit(1);
 });
 
-// Export for testing
+// Export functions for testing if needed.
 module.exports = {
     formatElapsedTime,
     getCurrentFormattedTime,

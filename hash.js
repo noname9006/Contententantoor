@@ -28,7 +28,8 @@ const LOG_EVENTS = {
     NEW_HASH: 'NEW_HASH_CREATED',
     HASH_COMPARED: 'HASH_COMPARED',
     DUPLICATE_FOUND: 'DUPLICATE_FOUND'
-};
+	};
+	
 // Create logs directory if it doesn't exist
 if (!fs.existsSync(LOG_CONFIG.logDir)) {
     fs.mkdirSync(LOG_CONFIG.logDir);
@@ -462,6 +463,18 @@ async function handleCheckCommand(message, channelId) {
 const TRACKED_CHANNELS = process.env.TRACKED_CHANNELS ? process.env.TRACKED_CHANNELS.split(',') : [];
 
 client.on(Events.MessageCreate, async message => {
+    if (message.author.bot) return;
+    
+    // Add debug logging
+    console.log(`Received message: ${message.content}`);
+    
+    if (message.content.startsWith('!hash')) {
+        console.log('Hash command detected');
+        const channelId = message.content.split(' ')[1];
+        console.log(`Channel ID: ${channelId}`);
+    }
+});	
+client.on(Events.MessageCreate, async message => {
     // Ignore bot messages and commands (starting with '!')
     if (message.author.bot) return;
     if (message.content.startsWith('!')) return;
@@ -576,6 +589,66 @@ client.on(Events.MessageCreate, async message => {
             message.reply(`Hash database built for channel ${channelId}. Processed ${hashDB.size} unique images.`);
         } catch (err) {
             message.reply(`Error building hash database: ${err.message}`);
+        }
+    }
+});
+
+client.on(Events.MessageCreate, async message => {
+    if (message.author.bot) return;
+    
+    console.log(`Received message: ${message.content}`);
+    
+    if (message.content.startsWith('!hash')) {
+        console.log('Hash command detected');
+        const channelId = message.content.split(' ')[1];
+        console.log(`Channel ID: ${channelId}`);
+        
+        try {
+            // Log the hash command received
+            logMessage(LOG_EVENTS.HASH_COMMAND, { channelId });
+            
+            // Fetch the channel
+            const channel = await client.channels.fetch(channelId);
+            if (!channel) {
+                return message.reply('Channel not found');
+            }
+
+            // Check permissions
+            await checkChannelPermissions(channel);
+            
+            // Log hash creation start
+            logMessage(LOG_EVENTS.HASH_START, { channelId });
+            
+            // Send initial response
+            const statusMessage = await message.reply('Starting to build hash database...');
+            
+            // Build hash database
+            const hashDB = await buildHashDatabaseForChannel(channel);
+            
+            // Save the database
+            saveHashDatabase(channelId, hashDB);
+            
+            // Log completion
+            logMessage(LOG_EVENTS.HASH_FINISH, { 
+                channelId,
+                totalImages: hashDB.size 
+            });
+            
+            // Update status message
+            await statusMessage.edit(`Hash database built for channel ${channelId}. Processed ${hashDB.size} unique images.`);
+            
+            // Log export
+            logMessage(LOG_EVENTS.HASH_EXPORT, {
+                channelId,
+                filename: `hashtable_${channelId}.json`
+            });
+            
+        } catch (error) {
+            logMessage('ERROR', {
+                error: error.message,
+                channelId
+            });
+            message.reply(`Error building hash database: ${error.message}`);
         }
     }
 });

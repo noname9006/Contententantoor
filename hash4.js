@@ -1049,20 +1049,20 @@ client.on(Events.MessageCreate, async (message) => {
                 const hash = await getImageHash(attachment.url);
                 
                 if (!hashDB.has(hash)) {
-    hashDB.set(hash, {
-        originalMessage: {
-            id: message.id,
-            url: message.url,
-            author: {
-                username: message.author.username,
-                id: message.author.id
-            },
-            timestamp: message.createdTimestamp,
-            channelId: message.channel.id
-        },
-        duplicates: [],
-        attachment: attachment // Save the attachment info
-    });
+                    hashDB.set(hash, {
+                        originalMessage: {
+                            id: message.id,
+                            url: message.url,
+                            author: {
+                                username: message.author.username,
+                                id: message.author.id
+                            },
+                            timestamp: message.createdTimestamp,
+                            channelId: message.channel.id
+                        },
+                        duplicates: [],
+                        attachment: attachment // Save the attachment info
+                    });
                 } else {
                     const entry = hashDB.get(hash);
                     const isSelfRepost = entry.originalMessage.author.id === message.author.id;
@@ -1073,9 +1073,10 @@ client.on(Events.MessageCreate, async (message) => {
                         .setColor(isSelfRepost ? 0xFFA500 : 0xFF0000)
                         .setTimestamp();
                     
-                    message.reply({ embeds: [embed] })
+                    await message.reply({ embeds: [embed] })
                         .catch(err => console.error('Failed to send duplicate notification:', err));
 
+                    // Save the duplicate image information
                     entry.duplicates.push({
                         id: message.id,
                         url: message.url,
@@ -1084,8 +1085,33 @@ client.on(Events.MessageCreate, async (message) => {
                             id: message.author.id
                         },
                         timestamp: message.createdTimestamp,
-                        channelId: message.channel.id
+                        channelId: message.channel.id,
+                        attachment: attachment
                     });
+
+                    // Handle saving images
+                    try {
+                        // If this is the first duplicate found, save both original and duplicate
+                        if (entry.duplicates.length === 1) {
+                            await saveImageAndDupes(
+                                entry.attachment,
+                                [attachment]
+                            );
+                        } else {
+                            // If we already have duplicates, just add the new one to the series
+                            await saveImageAndDupes(
+                                entry.attachment,
+                                entry.duplicates.map(d => d.attachment)
+                            );
+                        }
+                    } catch (saveError) {
+                        console.error('Error saving duplicate images:', saveError);
+                        logMessage(LOG_EVENTS.IMAGE_ERROR, {
+                            messageId: message.id,
+                            error: saveError.message,
+                            type: 'SAVE_DUPLICATE'
+                        });
+                    }
                 }
             } catch (err) {
                 console.error('Error processing image:', err);
@@ -1101,36 +1127,6 @@ client.on(Events.MessageCreate, async (message) => {
         channelHashTables[message.channel.id] = hashDB;
     }
 });
-
-const entry = hashDB.get(hash);
-    const isSelfRepost = entry.originalMessage.author.id === message.author.id;
-    
-    // Save the duplicate image information
-    entry.duplicates.push({
-        id: message.id,
-        url: message.url,
-        author: {
-            username: message.author.username,
-            id: message.author.id
-        },
-        timestamp: message.createdTimestamp,
-        channelId: message.channel.id,
-        attachment: attachment
-    });
-
-    // If this is the first duplicate found, save both original and duplicate
-    if (entry.duplicates.length === 1) {
-        await saveImageAndDupes(
-            entry.attachment,
-            [attachment]
-        );
-    } else {
-        // If we already have duplicates, just add the new one to the series
-        await saveImageAndDupes(
-            entry.attachment,
-            entry.duplicates.map(d => d.attachment)
-        );
-    }
 
 // Error Handlers
 client.on(Events.Error, error => {
